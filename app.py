@@ -1741,6 +1741,7 @@ def prompt_env_script_select(chat_id, user_id, message_id=None):
     if not files and all_files:
         files = all_files
 
+    vault = load_env_vault()
     buttons = []
     if not files:
         text = (
@@ -1754,14 +1755,20 @@ def prompt_env_script_select(chat_id, user_id, message_id=None):
             "⚙️ <b>Per-Script Environment (.env) Manager</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Each script/project has its own private <b><code>.env</code></b> vault loaded on launch.\n\n"
-            "<i>Select a script below to view & manage its variables:</i>"
+            "<i>Select a script to configure, or tap 🗑️ Delete to clear its environment:</i>"
         )
         for py in files:
             env_vars = read_script_env(py)
             count = len(env_vars)
-            badge = f"({count} vars set)" if count > 0 else "(0 vars)"
-            buttons.append([{"text": f"📁 {py} {badge}", "callback_data": f"env_dash_{py}"}])
+            badge = f"({count} vars)" if count > 0 else "(0 vars)"
+            cfg_btn = {"text": f"📁 {py} {badge}", "callback_data": f"env_dash_{py}"}
+            del_btn = {"text": "🗑️ Delete", "callback_data": f"env_wipe_one_{py}"}
+            buttons.append([cfg_btn, del_btn])
     
+    # Delete All ENVs button across entire workspace
+    if files or (vault and len(vault) > 0):
+        buttons.append([{"text": "💣 Delete All (.env) Variables", "callback_data": "env_wipe_all_prompt"}])
+        
     buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
     markup = {"inline_keyboard": buttons}
     if message_id:
@@ -1788,7 +1795,7 @@ def prompt_script_env_dashboard(chat_id, user_id, py_filename, message_id=None):
         f"📁 <b>Dedicated Config:</b> <code>scripts/{base_name}.env</code>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(var_lines)
-        + "\n\n<i>Use the buttons below to add or remove variables:</i>"
+        + "\n\n<i>Use the buttons below to manage, add, or delete variables:</i>"
     )
     
     buttons = [
@@ -1797,8 +1804,11 @@ def prompt_script_env_dashboard(chat_id, user_id, py_filename, message_id=None):
             {"text": "🗑️ Delete Variable", "callback_data": f"env_del_list_{py_filename}"}
         ],
         [
-            {"text": "🛡️ View Venv Packages", "callback_data": f"venv_list_{py_filename}"},
-            {"text": f"📥 Export {base_name}.env", "callback_data": f"env_exp_{py_filename}"}
+            {"text": "💣 Delete All Variables (.env)", "callback_data": f"env_wipe_one_{py_filename}"},
+            {"text": f"📥 Export {os.path.basename(base_name)}.env", "callback_data": f"env_exp_{py_filename}"}
+        ],
+        [
+            {"text": "🛡️ View Venv Packages", "callback_data": f"venv_list_{py_filename}"}
         ]
     ]
     if is_this_running:
@@ -1823,7 +1833,8 @@ def prompt_env_delete_list(chat_id, user_id, py_filename, message_id=None):
         text = f"🗑️ <b>Delete Variable from <code>{py_filename}</code>:</b>\n\nTap a variable below to remove it:"
         buttons = []
         for k in sorted(env_vars.keys()):
-            buttons.append([{"text": f"❌ Delete {k}", "callback_data": f"env_dodel_{py_filename}_{k}"}])
+            buttons.append([{"text": f"❌ Delete {k}", "callback_data": f"env_dodel_{py_filename}:::{k}"}])
+        buttons.append([{"text": "💣 Delete All Variables", "callback_data": f"env_wipe_one_{py_filename}"}])
         buttons.append([{"text": "🔙 Back", "callback_data": f"env_dash_{py_filename}"}])
         markup = {"inline_keyboard": buttons}
     
@@ -2340,14 +2351,102 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
     # 2f. Do Delete Variable
     elif data.startswith("env_dodel_"):
-        parts = data.replace("env_dodel_", "").split("_", 1)
-        if len(parts) == 2:
-            fname, var_key = parts[0], parts[1]
+        raw = data.replace("env_dodel_", "")
+        if ":::" in raw:
+            fname, var_key = raw.split(":::", 1)
+        else:
+            parts = raw.split("_", 1)
+            fname, var_key = (parts[0], parts[1]) if len(parts) == 2 else ("", "")
+            
+        if fname and var_key:
             env_dict = read_script_env(fname)
             env_dict.pop(var_key, None)
             write_script_env(fname, env_dict)
-            answer_callback(callback_id, f"{var_key} deleted!", show_alert=True)
+            answer_callback(callback_id, f"🗑️ {var_key} deleted in real-time!", show_alert=True)
             prompt_script_env_dashboard(chat_id, user_id, fname, message_id)
+
+    # 2f2. Wipe Single Script's Environment Variables
+    elif data.startswith("env_wipe_one_"):
+        fname = data.replace("env_wipe_one_", "")
+        answer_callback(callback_id, f"Wiping environment for {fname}...")
+        
+        # 1. Clear from vault
+        vault = load_env_vault()
+        clean = fname.replace("scripts/", "").lstrip("/").replace("\\", "/")
+        base_stem = clean.rsplit(".", 1)[0]
+        
+        keys_to_remove = [
+            k for k in list(vault.keys())
+            if k == clean or k == fname or k == base_stem 
+            or os.path.basename(k) == clean or os.path.basename(k) == base_stem
+            or (("/" in clean) and k.startswith(clean.split("/")[0]))
+        ]
+        for k in keys_to_remove:
+            vault.pop(k, None)
+        save_env_vault(vault)
+        
+        # 2. Delete physical .env files on disk
+        dir_name = os.path.dirname(clean)
+        target_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else SCRIPTS_DIR
+        for ef in [os.path.join(target_dir, ".env"), os.path.join(target_dir, f"{os.path.basename(base_stem)}.env")]:
+            if os.path.exists(ef):
+                try:
+                    os.remove(ef)
+                except Exception:
+                    pass
+                    
+        # 3. Synchronize deletion to GitHub in background
+        threading.Thread(target=git_sync_to_github, args=(f"Wipe .env variables for {clean}",), daemon=True).start()
+        
+        answer_callback(callback_id, f"✅ Environment wiped for {fname}!", show_alert=True)
+        # Refresh current view in real-time
+        prompt_script_env_dashboard(chat_id, user_id, fname, message_id)
+
+    # 2f3. Wipe All Script Environments Confirmation Prompt
+    elif data == "env_wipe_all_prompt":
+        answer_callback(callback_id)
+        text = (
+            "💣 <b>Confirm Delete All (.env) Variables</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <b>WARNING:</b> This will permanently delete <b>ALL environment variables and .env vaults</b> across ALL scripts in your workspace!\n\n"
+            "Are you absolutely sure?"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "💣 Yes, Delete All ENVs", "callback_data": "do_env_wipe_all"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_env_select"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 2f4. Execute Wipe All Script Environments in Real-Time
+    elif data == "do_env_wipe_all":
+        answer_callback(callback_id, "Wiping all environments...")
+        
+        # 1. Clear entire vault
+        config["env_vault"] = {}
+        save_config(config)
+        vault_file = get_env_vault_file()
+        try:
+            with open(vault_file, "w") as f:
+                json.dump({}, f)
+        except Exception:
+            pass
+            
+        # 2. Delete all physical .env files across scripts/ directory
+        for root, _, fs in os.walk(SCRIPTS_DIR):
+            for f in fs:
+                if f.endswith(".env") or f == ".env":
+                    try:
+                        os.remove(os.path.join(root, f))
+                    except Exception:
+                        pass
+                        
+        # 3. Synchronize deletion to GitHub
+        threading.Thread(target=git_sync_to_github, args=("Wipe all per-script .env vaults via Telegram",), daemon=True).start()
+        
+        answer_callback(callback_id, "✅ All .env variables deleted successfully in real-time!", show_alert=True)
+        prompt_env_script_select(chat_id, user_id, message_id)
 
     # 2g. Export .env file
     elif data.startswith("env_exp_"):
@@ -2872,7 +2971,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
     # 10b. Do Delete All Files Execution
     elif data in ["do_wipe_all_workspace", "do_delete_all_files"]:
         import shutil
-        answer_callback(callback_id, "Wiping workspace...")
+        answer_callback(callback_id, "Wiping entire workspace in real-time...")
         
         # 1. Stop all running child processes cleanly
         stop_child_app(script_name=None, clear_active=True)
@@ -2881,42 +2980,74 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         # 2. Reset running processes dictionary in memory
         running_processes.clear()
         
-        # 3. Delete all files & directories inside SCRIPTS_DIR safely
+        # 3. Explicitly remove all scripts and projects from Git index
+        try:
+            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", "scripts/*"], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+        
+        # 4. Completely wipe SCRIPTS_DIR directory on disk and recreate empty with .gitkeep
         deleted_count = 0
         try:
-            for it in os.listdir(SCRIPTS_DIR):
-                if it == ".gitkeep":
-                    continue
-                ip = os.path.join(SCRIPTS_DIR, it)
-                try:
-                    if os.path.isdir(ip):
-                        shutil.rmtree(ip, ignore_errors=True)
-                    else:
-                        os.remove(ip)
-                    deleted_count += 1
-                except Exception as e_del:
-                    logger.error(f"Error deleting {ip}: {e_del}")
+            if os.path.exists(SCRIPTS_DIR):
+                for it in os.listdir(SCRIPTS_DIR):
+                    if it == ".gitkeep":
+                        continue
+                    ip = os.path.join(SCRIPTS_DIR, it)
+                    try:
+                        if os.path.isdir(ip):
+                            shutil.rmtree(ip, ignore_errors=True)
+                        else:
+                            os.remove(ip)
+                        deleted_count += 1
+                    except Exception as e_del:
+                        logger.error(f"Error deleting {ip}: {e_del}")
+            os.makedirs(SCRIPTS_DIR, exist_ok=True)
+            with open(os.path.join(SCRIPTS_DIR, ".gitkeep"), "w") as f:
+                f.write("")
         except Exception as e:
             logger.error(f"Error wiping scripts dir: {e}")
             
-        # 4. Clean up any virtualenvs (.venvs/)
+        # 5. Clean up any virtualenvs (.venvs/)
         try:
             if os.path.exists(VENVS_DIR):
                 shutil.rmtree(VENVS_DIR, ignore_errors=True)
         except Exception:
             pass
 
-        # 5. Clear all active scripts, config, and vault
+        # 6. Clean up any leftover staging files or temporary logs in WORKSPACE_DIR
+        try:
+            for it in os.listdir(WORKSPACE_DIR):
+                if it.startswith(".staging_") or it.startswith("temp_") or it.startswith("logs_"):
+                    try:
+                        p = os.path.join(WORKSPACE_DIR, it)
+                        if os.path.isdir(p):
+                            shutil.rmtree(p, ignore_errors=True)
+                        else:
+                            os.remove(p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 7. Clear all active scripts, config, and vault
         config["active_scripts"] = []
         config["active_script"] = None
         config["auto_run_file"] = None
         config["env_vault"] = {}
         save_config(config)
         
-        # 6. Commit wipe to GitHub in background
+        vault_file = get_env_vault_file()
+        try:
+            with open(vault_file, "w") as f:
+                json.dump({}, f)
+        except Exception:
+            pass
+        
+        # 8. Commit wipe to GitHub in background
         threading.Thread(target=git_sync_to_github, args=("Wipe all scripts via Telegram",), daemon=True).start()
         
-        # 7. Edit message in real time to show confirmation
+        # 9. Edit message in real time to show confirmation
         wipe_text = (
             "✅ <b>Workspace Wiped Successfully!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2941,73 +3072,106 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             fname = data.replace("file_del_", "")
         
         if fname in ["all", "all_prompt"]:
-            # Handled by wipe workspace
             return
             
         # 1. Answer callback INSTANTLY so Telegram spinner immediately clears!
         answer_callback(callback_id, f"🗑️ Deleting {fname}...", show_alert=False)
         
-        # 2. Identify candidate paths to delete on disk
-        candidates_to_remove = [
-            os.path.join(SCRIPTS_DIR, fname),
-            os.path.join(WORKSPACE_DIR, fname),
-        ]
-        
-        # If fname is a nested path like "Ghidrabot vps/bot.py" or "xxtgdriveapibot/main.py", also check the parent project directory
-        clean_fname = fname.replace("\\", "/").strip("/")
-        if "/" in clean_fname:
-            parent_dir_name = clean_fname.split("/")[0]
-            candidates_to_remove.append(os.path.join(SCRIPTS_DIR, parent_dir_name))
-            candidates_to_remove.append(os.path.join(WORKSPACE_DIR, parent_dir_name))
-        
-        # Also stem without .py
+        # 2. Determine exact targets and project directory
+        clean_fname = fname.replace("scripts/", "").lstrip("/").replace("\\", "/")
         base_stem = clean_fname.rsplit(".", 1)[0]
-        candidates_to_remove.append(os.path.join(SCRIPTS_DIR, base_stem))
+        parts = clean_fname.split("/")
         
-        # 3. Stop running processes matching this script or its directory and wait for OS locks to clear
+        # Identify project folder name if this is part of a project folder
+        project_folder_name = parts[0] if len(parts) > 1 else None
+        if not project_folder_name and os.path.isdir(os.path.join(SCRIPTS_DIR, clean_fname)):
+            project_folder_name = clean_fname
+            
+        # 3. Stop running processes matching this script or its parent project
         stop_child_app(script_name=fname, clear_active=True)
+        if project_folder_name:
+            stop_child_app(script_name=project_folder_name, clear_active=True)
         time.sleep(0.5)
         
-        # 4. Explicitly mark removed from Git index in WORKSPACE_DIR
-        try:
-            for rel_target in [f"scripts/{clean_fname}", f"scripts/{fname}", f"scripts/{base_stem}", clean_fname, fname, base_stem]:
-                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", rel_target], cwd=WORKSPACE_DIR, capture_output=True)
-            if "/" in clean_fname:
-                parent_stem = clean_fname.split("/")[0]
-                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{parent_stem}", parent_stem], cwd=WORKSPACE_DIR, capture_output=True)
-        except Exception as e_git:
-            logger.error(f"git rm error: {e_git}")
+        # 4. Explicitly remove all candidate paths from Git index in WORKSPACE_DIR
+        git_targets_to_rm = [
+            f"scripts/{clean_fname}",
+            f"scripts/{fname}",
+            f"scripts/{base_stem}",
+            clean_fname,
+            fname,
+            base_stem,
+        ]
+        if project_folder_name:
+            git_targets_to_rm.extend([
+                f"scripts/{project_folder_name}",
+                project_folder_name
+            ])
+            
+        for g_tgt in git_targets_to_rm:
+            try:
+                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", g_tgt], cwd=WORKSPACE_DIR, capture_output=True)
+            except Exception:
+                pass
 
-        # 5. Clean up disk
+        # 5. Clean up disk completely (including the entire project folder if applicable)
         import shutil
-        deleted_anything = False
-        for target_path in candidates_to_remove:
-            if os.path.exists(target_path):
+        disk_paths_to_remove = [
+            os.path.join(SCRIPTS_DIR, clean_fname),
+            os.path.join(SCRIPTS_DIR, fname),
+            os.path.join(WORKSPACE_DIR, clean_fname),
+            os.path.join(WORKSPACE_DIR, fname),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.requirements.txt"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.env"),
+            os.path.join(SCRIPTS_DIR, f"{clean_fname}.env"),
+            os.path.join(SCRIPTS_DIR, f"{clean_fname}.requirements.txt"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.session"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.session-journal"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.db"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.db-journal"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.db-wal"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.db-shm"),
+        ]
+        
+        if project_folder_name:
+            disk_paths_to_remove.extend([
+                os.path.join(SCRIPTS_DIR, project_folder_name),
+                os.path.join(WORKSPACE_DIR, project_folder_name),
+            ])
+            
+        for dp in disk_paths_to_remove:
+            if os.path.exists(dp):
                 try:
-                    if os.path.isdir(target_path):
-                        shutil.rmtree(target_path, ignore_errors=True)
+                    if os.path.isdir(dp):
+                        shutil.rmtree(dp, ignore_errors=True)
                     else:
-                        os.remove(target_path)
-                    deleted_anything = True
+                        os.remove(dp)
                 except Exception as e_del:
-                    logger.error(f"Error removing {target_path}: {e_del}")
+                    logger.error(f"Error removing {dp}: {e_del}")
 
-        # Clean companion files (.env, .requirements.txt, etc.)
-        for extra in [f"{base_stem}.requirements.txt", f"{base_stem}.env", f"{clean_fname}.env", f"{clean_fname}.requirements.txt"]:
-            extra_p = os.path.join(SCRIPTS_DIR, extra)
-            if os.path.exists(extra_p):
-                try:
-                    os.remove(extra_p)
-                except Exception:
-                    pass
+        # 6. Clean staging and temp files matching this script/project
+        try:
+            for it in os.listdir(WORKSPACE_DIR):
+                if it.startswith(".staging_") or it.startswith("temp_") or it.startswith("logs_"):
+                    if clean_fname in it or base_stem in it or (project_folder_name and project_folder_name in it):
+                        try:
+                            p = os.path.join(WORKSPACE_DIR, it)
+                            if os.path.isdir(p):
+                                shutil.rmtree(p, ignore_errors=True)
+                            else:
+                                os.remove(p)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
-        # 6. Clean up isolated virtualenvs
+        # 7. Clean up isolated virtualenvs
         venv_slugs = [
             re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_fname),
             re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_stem),
         ]
-        if "/" in clean_fname:
-            venv_slugs.append(re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_fname.split("/")[0]))
+        if project_folder_name:
+            venv_slugs.append(re.sub(r'[^a-zA-Z0-9_\-\.]', '_', project_folder_name))
             
         for vslug in venv_slugs:
             v_dir = os.path.join(VENVS_DIR, vslug)
@@ -3017,7 +3181,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 except Exception:
                     pass
 
-        # 7. Clean up config active_scripts and vault
+        # 8. Clean up config active_scripts and vault
         active_list = list(get_active_running_processes().keys())
         config["active_scripts"] = active_list
 
@@ -3027,7 +3191,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             if k == clean_fname 
             or k == fname 
             or k.startswith(f"{clean_fname}/") 
-            or (("/" in clean_fname) and (k.startswith(clean_fname.split("/")[0]) or os.path.dirname(k) == clean_fname.split("/")[0]))
+            or (project_folder_name and (k == project_folder_name or k.startswith(f"{project_folder_name}/") or os.path.dirname(k) == project_folder_name))
             or os.path.basename(k) == clean_fname
             or os.path.basename(k) == base_stem
         ]
@@ -3036,10 +3200,10 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         save_env_vault(vault)
         save_config(config)
 
-        # 8. Single thread-safe background sync to permanently push deletion to GitHub repo!
-        threading.Thread(target=git_sync_to_github, args=(f"Permanently delete scripts/{fname} from repository",), daemon=True).start()
+        # 9. Single thread-safe background sync to permanently push deletion to GitHub repo!
+        threading.Thread(target=git_sync_to_github, args=(f"Permanently delete scripts/{project_folder_name or clean_fname} from repository",), daemon=True).start()
 
-        # 9. Refresh Telegram View in Real Time!
+        # 10. Refresh Telegram View in Real Time!
         show_files_view(chat_id, message_id)
 
     # 11. Pip prompt
