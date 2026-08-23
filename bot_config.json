@@ -5,6 +5,8 @@
   ],
   "active_scripts": [],
   "auto_run_file": null,
-  "env_vault": {},
+  "env_vault": {
+    "xxtgdriveapibot/main.py": "Ce819R0kXIUWUdPZemCgdHMpy0/uKo8iYdP98EC5ooIc/32JWK5HUaN6nNKdwskHXcBYWIDgfzNI8MbMefLCb4SLHSaZNHURqbGeN2IVMee5EKtvaJtYWgPA0b1rCoTUNKqeq1VXs+UEsRxnZ0tHowTAvueXWuiCyDHGwVZGUKmqjhzfTqu/R6eFjrO25Ec6zDyW2JbfIn2HLEn3xUxS7xSrRA5y8uDv+4HSEpxdjaP4znMC9Yi0lNR48tSYSEgQHpKE380qx8AJBkpY1T+wiPH7qu9hTldMyTWoZ3IqxUq2kCKrcvQ0vOBZtPKw6Nd2HlLxGEOI21XBUu1FOqEjXht3OuaRwvtQINMjhRoe54+f8B1pF03uQtVmMBDEoNbxalIWC6EEnGPpRpz6yrd3yoowE6m8qAUgV8+vxdeYgp4yvKPZ7txVRTqzOD2eOKsWO+ZEf49jr2omS2UN+kSe+cSc6gA1380djzrl/pWNpueji9mpQENazEf8dba0dXXozc66zmFJhmOgV6B9Bhte7P0Xj2hxd7qAOt6IS/5Vc2Zg1NJ7fgeOBMhDWWT8cjyS6c6B95Y9SnBELrqZFLXJ2XafAzcuBK2eT5r6uLPNOkB5"
+  },
   "active_script": null
 }
