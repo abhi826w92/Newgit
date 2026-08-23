@@ -3,7 +3,9 @@
     7249511572,
     7251749429
   ],
-  "active_scripts": [],
+  "active_scripts": [
+    "xxtgdriveapibot/main.py"
+  ],
   "auto_run_file": null,
   "env_vault": {
     "xxtgdriveapibot/main.py": "aaoGrcppUY5FaIR17ZgvWsHSXzy4fGzNxKTGonei1HqBnVSd1WAiCvMLiYi55568MAAp2U3cKpgv7HJxbdsNaAi74AjwJu87+tN+m2TXEsbL7HJEwCf+vpNcpBianmSOW2quAkL0hhlMpv6iyCAFN150S5kA1UmbW1QAf+LqHK3xZzVMumdzeAXH+6HVaTJ1DoDYyrraYAU4kNXn3u2ma3OyQ67eEJZGi9a01LDYQB2V3p4nKSkxXgZpGM71Y9NeNbEjflNh4faIYmeTUh6QrGfUeyVn+psn6KbmCpEdhkjyqFFMaXV+QJFRpC/Ft42dkdUDpNQUbwwVD9OVX2IulERxI3XmRzWaL83mZzlF0vhAOGe9DQZeXJ6DxwlfKVCDNZsD7uOd2bRSqDMMet/afyV9WzNdlB/QYmFA5Z5zymYJt25xndXnsYUCB0cU7uErKRiV4W5vXT8sZHu2ZChzQOqmVcGgAMqSac+4cyzpWzXxQYfJyOCZW+j2pcz8AOF227VsytKRBw2wGmvAmO1ihEp4i5vtP1M4E+c2xrCdUykyy6WfSeiEhzDxzsg+uslKU+Jl4b31c9LFHzq88VPVSBvmfOCVWkr4ME/5wXTsT4UQ"
