@@ -2545,16 +2545,19 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         base_stem = clean_fname.rsplit(".", 1)[0]
         candidates_to_remove.append(os.path.join(SCRIPTS_DIR, base_stem))
         
-        # 3. Stop running processes matching this script or its directory
-        stop_child_app(script_name=fname, clear_active=False)
+        # 3. Stop running processes matching this script or its directory and wait for OS locks to clear
+        stop_child_app(script_name=fname, clear_active=True)
+        time.sleep(0.5)
         
-        # 4. Explicitly mark removed from Git index to guarantee permanent deletion from GitHub repo!
+        # 4. Explicitly mark removed from Git index in WORKSPACE_DIR
         try:
-            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{clean_fname}", f"scripts/{fname}", f"scripts/{base_stem}"], capture_output=True)
+            for rel_target in [f"scripts/{clean_fname}", f"scripts/{fname}", f"scripts/{base_stem}", clean_fname, fname, base_stem]:
+                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", rel_target], cwd=WORKSPACE_DIR, capture_output=True)
             if "/" in clean_fname:
-                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{clean_fname.split('/')[0]}"], capture_output=True)
-        except Exception:
-            pass
+                parent_stem = clean_fname.split("/")[0]
+                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{parent_stem}", parent_stem], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception as e_git:
+            logger.error(f"git rm error: {e_git}")
 
         # 5. Clean up disk
         import shutil
