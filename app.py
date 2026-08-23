@@ -675,7 +675,7 @@ def get_or_create_venv(clean_name):
     return py_bin, pip_bin, venv_dir
 
 def check_and_install_reqs(req_path, clean_name=None):
-    """Smart installer: installs packages into the script's isolated virtualenv."""
+    """Smart installer: installs packages into both the isolated virtualenv and system Python with line-by-line error fallback."""
     if not req_path or not os.path.exists(req_path):
         return
     import hashlib
@@ -690,15 +690,72 @@ def check_and_install_reqs(req_path, clean_name=None):
         py_bin, pip_bin, venv_dir = get_or_create_venv(clean_name or "global")
         logger.info(f"📦 Installing requirements into isolated venv ({clean_name}) from {os.path.basename(req_path)}...")
         
+        # 1. Install into virtualenv
         if isinstance(pip_bin, list):
             cmd = pip_bin + ["install", "-r", req_path]
         else:
             cmd = [pip_bin, "install", "-r", req_path]
             
-        subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # 2. Install into host Python as well for maximum reliability
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, text=True)
+        
+        # 3. If bulk install encountered an error, try installing line-by-line
+        if res.returncode != 0:
+            logger.warning(f"Bulk install returned non-zero, falling back to line-by-line install for {req_path}...")
+            try:
+                with open(req_path, "r", encoding="utf-8", errors="ignore") as rf:
+                    lines = [l.strip() for l in rf if l.strip() and not l.startswith("#")]
+                for line in lines:
+                    pkg_spec = line.split(";")[0].strip()
+                    if pkg_spec:
+                        if isinstance(pip_bin, list):
+                            subprocess.run(pip_bin + ["install", pkg_spec], capture_output=True)
+                        else:
+                            subprocess.run([pip_bin, "install", pkg_spec], capture_output=True)
+                        subprocess.run([sys.executable, "-m", "pip", "install", pkg_spec], capture_output=True)
+            except Exception:
+                pass
+                
         installed_req_hashes[hash_key] = file_hash
     except Exception as e:
         logger.error(f"Error installing requirements: {e}")
+
+def auto_install_script_imports(py_filepath, clean_name=None):
+    """Scans python script for third-party imports and automatically pre-installs missing packages."""
+    if not py_filepath or not os.path.exists(py_filepath):
+        return
+    stdlib_modules = {
+        "os", "sys", "time", "json", "math", "re", "threading", "asyncio", "subprocess",
+        "shutil", "hashlib", "logging", "datetime", "html", "urllib", "collections",
+        "itertools", "functools", "typing", "pathlib", "tempfile", "glob", "socket",
+        "traceback", "base64", "struct", "io", "sqlite3", "random", "uuid", "queue",
+        "contextlib", "inspect", "enum", "dataclasses", "unittest", "copy", "platform",
+        "signal", "select", "multiprocessing", "gc", "builtins", "abc", "typing_extensions"
+    }
+    try:
+        with open(py_filepath, "r", encoding="utf-8", errors="ignore") as f:
+            code = f.read()
+        import re
+        imports = set()
+        for m in re.finditer(r'^(?:from|import)\s+([a-zA-Z0-9_]+)', code, re.MULTILINE):
+            mod = m.group(1)
+            if mod and mod not in stdlib_modules:
+                imports.add(mod)
+        
+        if imports:
+            py_bin, pip_bin, venv_dir = get_or_create_venv(clean_name or os.path.basename(py_filepath))
+            for mod in imports:
+                pip_pkg = map_module_to_pip_pkg(mod)
+                if pip_pkg:
+                    if isinstance(pip_bin, list):
+                        subprocess.run(pip_bin + ["install", pip_pkg], capture_output=True)
+                    else:
+                        subprocess.run([pip_bin, "install", pip_pkg], capture_output=True)
+                    subprocess.run([sys.executable, "-m", "pip", "install", pip_pkg], capture_output=True)
+    except Exception as e:
+        logger.error(f"Error in auto_install_script_imports: {e}")
 
 def stop_process_graceful_then_force(proc, pid, stored_create_time, timeout=2.5):
     """
@@ -805,10 +862,19 @@ def start_child_app(filename="bot.py", force_restart=False):
         # 1. Get or create isolated Virtualenv for this script/project!
         venv_py, venv_pip, venv_dir = get_or_create_venv(clean_name)
 
-        # 2. Smart Auto-install dependencies into isolated venv
+        # 2. Smart Auto-install dependencies into isolated venv and system Python
         req_path = get_script_req_path(clean_name)
         if req_path:
             check_and_install_reqs(req_path, clean_name=clean_name)
+            
+        if "/" in clean_name:
+            proj_root = os.path.join(SCRIPTS_DIR, clean_name.split("/")[0])
+            for r, _, fs in os.walk(proj_root):
+                for f in fs:
+                    if "requirements" in f.lower() and f.endswith(".txt"):
+                        check_and_install_reqs(os.path.join(r, f), clean_name=clean_name)
+
+        auto_install_script_imports(real_script_path, clean_name=clean_name)
 
         # 3. Security scan before launch
         abuse_reason = scan_script_for_abuse(full_path)
