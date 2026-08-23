@@ -326,6 +326,32 @@ def extract_missing_module(log_text):
         return match.group(1)
     return None
 
+def map_module_to_pip_pkg(mod_name):
+    """Maps imported python module name to the correct pip package name."""
+    if not mod_name:
+        return ""
+    root = mod_name.split(".")[0]
+    mapping = {
+        "PIL": "Pillow",
+        "bs4": "beautifulsoup4",
+        "yaml": "pyyaml",
+        "dateutil": "python-dateutil",
+        "dotenv": "python-dotenv",
+        "telegram": "python-telegram-bot",
+        "cv2": "opencv-python-headless",
+        "crypto": "pycryptodome",
+        "Crypto": "pycryptodome",
+        "nacl": "PyNaCl",
+        "telethon": "telethon",
+        "pyrogram": "pyrogram",
+        "tgcrypto": "tgcrypto",
+        "aiohttp": "aiohttp",
+        "httpx": "httpx",
+        "requests": "requests",
+        "psutil": "psutil"
+    }
+    return mapping.get(root, root)
+
 def get_script_req_path(py_filename):
     base_name = os.path.basename(py_filename)
     if base_name.endswith(".py"):
@@ -519,8 +545,10 @@ def resource_guard_monitor(proc, fname):
             logger.debug(f"Resource guard loop error: {e}")
             time.sleep(2)
 
+autofix_attempts = {}
+
 def child_watchdog(proc, fname):
-    """Watches the running child process and sends alert if it exits or crashes."""
+    """Watches the running child process and sends alert or self-heals if it exits or crashes."""
     ret = proc.wait()
     pdata = running_processes.get(fname, {})
     is_stopped = pdata.get("is_stopped", False)
@@ -542,6 +570,31 @@ def child_watchdog(proc, fname):
         if ret != 0:
             missing_mod = extract_missing_module(recent_err)
             if missing_mod:
+                pip_pkg = map_module_to_pip_pkg(missing_mod)
+                retry_key = f"autofix_{fname}"
+                attempts = autofix_attempts.get(retry_key, 0)
+                if attempts < 3:
+                    autofix_attempts[retry_key] = attempts + 1
+                    logger.info(f"⚡ [Auto-Self-Heal] Missing module '{missing_mod}' in {fname}. Auto-installing '{pip_pkg}'...")
+                    notify_all_admins(
+                        f"🛠️ <b>Self-Healing System Active:</b>\n"
+                        f"Missing package <code>{missing_mod}</code> detected in <code>{fname}</code>.\n"
+                        f"⏳ Automatically installing <code>{pip_pkg}</code> and restarting (Attempt {attempts+1}/3)..."
+                    )
+                    py_bin, pip_bin, venv_dir = get_or_create_venv(fname)
+                    if isinstance(pip_bin, list):
+                        cmd = pip_bin + ["install", pip_pkg]
+                    else:
+                        cmd = [pip_bin, "install", pip_pkg]
+                    subprocess.run(cmd, capture_output=True, text=True)
+                    subprocess.run([sys.executable, "-m", "pip", "install", pip_pkg], capture_output=True, text=True)
+                    
+                    time.sleep(1.0)
+                    ok_restart, restart_msg = start_child_app(fname)
+                    if ok_restart:
+                        notify_all_admins(f"🟢 <b>Auto-Healing Succeeded!</b>\n<code>{fname}</code> is now running with <code>{pip_pkg}</code> installed.")
+                        return
+
                 alert_text = (
                     f"⚠️ <b>Script Crashed: Missing Module <code>{missing_mod}</code></b>\n"
                     f"📁 <b>Script:</b> <code>{fname}</code>\n"
@@ -614,7 +667,7 @@ def get_or_create_venv(clean_name):
     if not os.path.exists(py_bin):
         logger.info(f"🛡️ Creating isolated virtualenv for {clean_name} at {venv_dir}...")
         try:
-            subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True, capture_output=True)
+            subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", venv_dir], check=True, capture_output=True)
         except Exception as e:
             logger.error(f"Failed to create venv: {e}, falling back to system python")
             return sys.executable, [sys.executable, "-m", "pip"], None
