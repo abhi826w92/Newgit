@@ -7,6 +7,8 @@
     "tgdriveapi-python (3)/app.py"
   ],
   "auto_run_file": null,
-  "env_vault": {},
+  "env_vault": {
+    "xxtgdriveapibot/main.py": "KcDZwl3gPKp88+KGZzuBpqmFWwW5weERlj5+FWbcue4Mq6ceMCrzrB0+2YSaKukHhFStSoezstnAuNzu2/T48AbYaNH+FlUI0uHv2KvOilafBKF2BSbOs8ATLBnflVaTompiqJd5+28dT1ZTwicBoRzqfOesWOwsOGy7TOmWaGpq9W8YEmNgHI3Xphmy75EynpkCXu9+UdV5uLjaT/BJZlA/jPpUPVoBn3mIkQYl1HWvBfFKAzWVciEMDhfFGpZHwgXsswDlW4qXbQoDggBkDZchGndC8TVrSzJuAqo77s5FTOhq2Y9TCmPvMt10ldMHxpTznQMO8AaoH/+ORkQsScvY3RBYpF9n43IN9irvoWm7ekTdk6C9bhedvigU5yXMS6omb2IgUAyRt/pa5l1yFpzaBzGx4bohR/OpoRr846HRewegLRBkXPi5K//zFwI2CUL5toqbozG87Plokw8FGfBpU4u0bxPytctAEjHFXKqT/kCloCOvCFU4aIj+uypiDmz+/On5uE0bP6eIfXF7LOnHhFKg8McF/37iJKSqcEBl3NZSQ44I+m2/0I3RNtH9Ma8d251q+8UlIFwYWGkjlIwWzXkU7OB6DkkmQ3hQxNKv"
+  },
   "active_script": null
 }
