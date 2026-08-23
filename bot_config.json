@@ -3,11 +3,7 @@
     7249511572,
     7251749429
   ],
-  "active_scripts": [
-    "tgdriveapi-python (3)/app.py",
-    "Ghidrabot vps/bot.py",
-    "xxtgdriveapibot/main.py"
-  ],
+  "active_scripts": [],
   "auto_run_file": null,
   "env_vault": {
     "main.py": "JeL9Tnzy+yzK7g5eSMr3cJSbFGg4Z9cZzv2fn/jSBgVU4ju+lRSsUIxlZ8D3jbeVfFd73HPsq79jNqdgWgwj4LNXhx9zq+8JvL2mSi7hAh5cX5s780rZubIoGWhwf3j9nynz+RcJKOn41wv/cUmBNt4pNGDtRcpb45urV6kLCRfPb6ZtPmxcu5OWT2PC1W1v6QOdF/8x92Xa4hCw3D1eMFAeRbzashSUEu4oPJOSvEkcXXMn3cY0HKZ7g95RDMW4LcYcpc+YOf8nAt7R+V5uOz/MznOuM1c+Q3TiJQIPyEmXM5B1nQ6dqLViPBdTgS0A9AUGTT5A0xamwKgDSkTH+OqNNQ5+cS5KKbjzux/azA6IM7KxgB6H/4odzmOkvtkTM3ghO3br3omGbFbqjYbefN+yJFfGESbDFjrdeeIpt40M78N7+cMWKFmqnL+Z2t7SATUXjFy2haWzYCZBXtIprDUoZE1tBtQSzwWNhBl3e7dPjWEiiPOgiIT/4GCnu+H3juBc3YVjhb2HB6ZL5PkUgZnJJHSuwfVJ/wiDksSLkATzpuWx8tSXg5MZmOgx6ukuo6NR1vHtI/8tU8WgIOuP5y1LA7454s7aJWsNg4RLTzNOogezr6hBN2qKpsEAdkYCO3n5RkYIPpj8DfMHnjnsu8rvfaKM10xb7WJ2g46s1J9OGCV8kq0/eKGua1oogkGZTkrm0Mw9AhDPbwogCjSQ9dLqfmyiZS8+FBR6aYH5zQnhbwCCmp2QRmaraVtipIxZfLFFpX+L+yXfj6wxnKe55JHWuEYSPsyB+jiWfeGPQHn3HmrKYKGonQkDr4gAWwOiYPaTRBDTredc0Lo/wHdxZ9Khy1vogJNClfhy+9SDY2RalZxpQ5mZFc6WopOq3rVxEqAjYe9tXoipwwtEvJBXGbdzq8QcsuMvuWqtQ5AKhxBQb8eYK6IaSBDoGC14pqFyEELcX6Mo5vW5D4sgLvNaMu/RAnDjwO3dcy266mMm0BY1s91t2qaJoQ6QaQTkBgELkRHsKVC8btk0UN7G9NkDIZ873bCAz0llGnW2gwEv/eh2mC/mrUVRuUv2Y+Qglw8g9Mhy2IWVq/BqT992kPT/fjHWsb3N6NJBq2zwqXIC2MGaTwzn9au3WhYFSwDEo1AcTC43h9HMiOqhiGyP",
