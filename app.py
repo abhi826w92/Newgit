@@ -279,17 +279,14 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
             if status.stdout.strip():
                 subprocess.run(["git", "commit", "-m", commit_message], check=True)
             
-            # 4. Pull remote changes with autostash rebase to prevent restoring deleted files
-            subprocess.run(["git", "pull", "--rebase", "--autostash", remote_url, "main"], capture_output=True)
-            
-            # 5. Push changes
+            # 4. Push changes directly
             push_res = subprocess.run(["git", "push", remote_url, "main"], capture_output=True, text=True)
             if push_res.returncode == 0:
                 logger.info("Auto-sync to cloud complete.")
                 return True, "Cloud sync complete! All changes backed up."
             else:
-                # If rejected, try rebase once and push again
-                subprocess.run(["git", "pull", "--rebase", "--autostash", remote_url, "main"], capture_output=True)
+                # If rejected, rebase with -X ours so local deletions/new code take precedence
+                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, "main"], capture_output=True)
                 push_res = subprocess.run(["git", "push", remote_url, "main"], capture_output=True, text=True)
                 if push_res.returncode == 0:
                     logger.info("Auto-sync to cloud complete after rebase.")
@@ -2551,7 +2548,15 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         # 3. Stop running processes matching this script or its directory
         stop_child_app(script_name=fname, clear_active=False)
         
-        # 4. Clean up disk
+        # 4. Explicitly mark removed from Git index to guarantee permanent deletion from GitHub repo!
+        try:
+            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{clean_fname}", f"scripts/{fname}", f"scripts/{base_stem}"], capture_output=True)
+            if "/" in clean_fname:
+                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{clean_fname.split('/')[0]}"], capture_output=True)
+        except Exception:
+            pass
+
+        # 5. Clean up disk
         import shutil
         deleted_anything = False
         for target_path in candidates_to_remove:
@@ -2574,7 +2579,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 except Exception:
                     pass
 
-        # 5. Clean up isolated virtualenvs
+        # 6. Clean up isolated virtualenvs
         venv_slugs = [
             re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_fname),
             re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_stem),
@@ -2590,7 +2595,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 except Exception:
                     pass
 
-        # 6. Clean up config active_scripts and vault
+        # 7. Clean up config active_scripts and vault
         active_list = list(get_active_running_processes().keys())
         config["active_scripts"] = active_list
 
@@ -2609,10 +2614,10 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         save_env_vault(vault)
         save_config(config)
 
-        # 7. Single thread-safe background sync to cloud
-        threading.Thread(target=git_sync_to_github, args=(f"Deleted scripts/{fname} via Telegram",), daemon=True).start()
+        # 8. Single thread-safe background sync to permanently push deletion to GitHub repo!
+        threading.Thread(target=git_sync_to_github, args=(f"Permanently delete scripts/{fname} from repository",), daemon=True).start()
 
-        # 8. Refresh Telegram View in Real Time!
+        # 9. Refresh Telegram View in Real Time!
         show_files_view(chat_id, message_id)
 
     # 11. Pip prompt
@@ -2836,22 +2841,33 @@ def handle_document_upload(chat_id, user_id, doc):
         # Sync project code safely to GitHub cloud
         git_sync_to_github(f"Deploy ZIP project: {zip_base}")
 
+        # Auto-Launch the newly uploaded project entry script immediately!
+        launch_status_text = ""
+        if entry_script:
+            ok_run, run_msg = start_child_app(entry_script, force_restart=True)
+            if ok_run:
+                launch_status_text = f"🟢 <b>Status:</b> <code>{entry_script}</code> is now <b>RUNNING!</b>"
+            else:
+                launch_status_text = f"⚠️ <b>Launch Note:</b> {run_msg}"
+
         entry_display = entry_script or 'None'
         deploy_msg = (
-            f"🚀 <b>ZIP Project Deployed Successfully!</b>\n"
+            f"🚀 <b>ZIP Project Deployed & Launched!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📦 <b>Archive:</b> <code>{file_name}</code>\n"
             f"📁 <b>Files Extracted:</b> {len(extracted_files)}\n"
             f"🎯 <b>Detected Entry Script:</b> <code>{entry_display}</code>\n"
+            f"{launch_status_text}\n"
             f"📦 <b>Dependencies:</b> {'Installed ~' + str(req_installed_count) + ' packages' if found_reqs else 'No requirements.txt found'}\n"
             f"🔒 <b>Environment:</b> {str(env_loaded_count) + ' variables loaded' if env_loaded_count else 'No .env found'}\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "<i>Click below to launch your project or manage environment:</i>"
+            "<i>Manage your project using the buttons below:</i>"
         )
         buttons = []
         if entry_script:
-            buttons.append([{"text": f"▶️ Launch {entry_script} Now", "callback_data": f"exec_run_{entry_script}"}])
-            buttons.append([{"text": f"⚙️ Configure {entry_script} ENV", "callback_data": f"env_dash_{entry_script}"}])
+            buttons.append([{"text": f"🛑 Stop {os.path.basename(entry_script)}", "callback_data": f"confirm_stop_prompt_{entry_script}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{entry_script}"}])
+            buttons.append([{"text": f"⚙️ Configure {os.path.basename(entry_script)} ENV", "callback_data": f"env_dash_{entry_script}"}])
+            buttons.append([{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{entry_script}"}])
         buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}])
         buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
 
@@ -2878,7 +2894,7 @@ def handle_document_upload(chat_id, user_id, doc):
             target_py = current_state.get("target_py", target_py)
             user_states.pop(user_id, None)
             send_tg_message(chat_id, f"✅ <b>Dependencies installed!</b>\n🚀 Now auto-launching <code>{target_py}</code>...")
-            ok_run, run_msg = start_child_app(target_py)
+            ok_run, run_msg = start_child_app(target_py, force_restart=True)
             send_tg_message(chat_id, run_msg, reply_markup=get_main_menu_keyboard())
         else:
             out_summary = res.stdout[-2000:] if res.stdout else "All requirements satisfied."
@@ -2899,23 +2915,29 @@ def handle_document_upload(chat_id, user_id, doc):
     
     # 2. If uploaded a .py script
     elif file_name.endswith(".py"):
-        user_states[user_id] = {
-            "action": "WAITING_REQ_FOR_PY",
-            "target_py": file_name
-        }
+        user_states.pop(user_id, None)
+        
+        # Stop any existing instance so new code runs fresh
+        stop_child_app(script_name=file_name, clear_active=False)
+        time.sleep(0.5)
+        
+        # Auto-launch the newly uploaded Python script immediately!
+        ok_run, run_msg = start_child_app(file_name, force_restart=True)
+        status_line = f"🟢 <b>Status:</b> <code>{file_name}</code> is now <b>RUNNING!</b>" if ok_run else f"⚠️ <b>Status:</b> {run_msg}"
         
         text = (
-            f"✨ <b>Python Script Saved:</b> <code>scripts/{file_name}</code>\n"
+            f"✨ <b>Python Script Deployed & Launched!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📁 Saved into <b>scripts/</b> folder.\n\n"
-            "📦 You can send a <b>requirements.txt</b> file to install dependencies,\n"
-            "or use the buttons below to run directly:"
+            f"📁 <b>File:</b> <code>scripts/{file_name}</code>\n"
+            f"{status_line}\n\n"
+            "<i>Manage your script using the buttons below:</i>"
         )
         markup = {
             "inline_keyboard": [
-                [{"text": f"▶️ Run {file_name} Now", "callback_data": f"exec_run_{file_name}"}],
+                [{"text": f"🛑 Stop {file_name}", "callback_data": f"confirm_stop_prompt_{file_name}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{file_name}"}],
                 [{"text": f"⚙️ Manage {file_name} ENV", "callback_data": f"env_dash_{file_name}"}],
-                [{"text": "🚀 Open Scripts Runner", "callback_data": "menu_runner"}],
+                [{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{file_name}"}],
+                [{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}],
                 [{"text": "🔙 Main Menu", "callback_data": "menu_main"}]
             ]
         }
