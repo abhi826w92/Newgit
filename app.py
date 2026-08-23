@@ -2340,6 +2340,265 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         answer_callback(callback_id, "Upload cancelled.")
         edit_tg_message(chat_id, message_id, "❌ <b>Upload cancelled.</b> Running instances were not modified.", reply_markup=get_main_menu_keyboard())
 
+    # 4d. Duplicate ZIP Project: 1. Deploy New Project
+    elif data.startswith("zip_new_"):
+        state = user_states.get(user_id, {})
+        staged_path = state.get("staging_path")
+        file_name = state.get("file_name", "project.zip")
+        next_proj_name = state.get("next_proj_name", "project_2")
+        
+        if not staged_path or not os.path.exists(staged_path):
+            answer_callback(callback_id, "Staged file expired. Please upload again.", show_alert=True)
+            return
+            
+        answer_callback(callback_id, f"Deploying new project {next_proj_name}...")
+        user_states.pop(user_id, None)
+        
+        import zipfile
+        target_dir = os.path.join(SCRIPTS_DIR, next_proj_name)
+        os.makedirs(target_dir, exist_ok=True)
+        extracted_files = []
+        try:
+            with zipfile.ZipFile(staged_path, 'r') as zip_ref:
+                namelist = zip_ref.namelist()
+                top_dirs = {item.split('/')[0] for item in namelist if item and not item.startswith('/')}
+                if len(top_dirs) == 1 and all(item.startswith(list(top_dirs)[0] + '/') or item == list(top_dirs)[0] for item in namelist):
+                    root_f_name = list(top_dirs)[0]
+                    for member in zip_ref.infolist():
+                        parts = member.filename.split('/', 1)
+                        if len(parts) > 1 and parts[1]:
+                            member.filename = parts[1]
+                            zip_ref.extract(member, target_dir)
+                else:
+                    zip_ref.extractall(target_dir)
+                extracted_files = namelist
+            try:
+                os.remove(staged_path)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                os.remove(staged_path)
+            except Exception:
+                pass
+            edit_tg_message(chat_id, message_id, f"❌ Failed to extract zip: {e}", reply_markup=get_main_menu_keyboard())
+            return
+            
+        entry_script = detect_project_entry_script(target_dir)
+        
+        found_reqs = []
+        found_envs = []
+        for root, _, fs in os.walk(target_dir):
+            for f in fs:
+                fp = os.path.join(root, f)
+                if "requirements" in f.lower() and f.endswith(".txt"):
+                    found_reqs.append(fp)
+                elif f.endswith(".env") or f == ".env":
+                    found_envs.append(fp)
+                    
+        req_count = 0
+        if found_reqs and entry_script:
+            for req in found_reqs:
+                check_and_install_reqs(req, clean_name=entry_script)
+                with open(req, "r", encoding="utf-8", errors="ignore") as rf:
+                    req_count += len([l for l in rf if l.strip() and not l.startswith("#")])
+                    
+        env_count = 0
+        if found_envs and entry_script:
+            for ef in found_envs:
+                parsed = {}
+                with open(ef, "r", encoding="utf-8", errors="ignore") as rf:
+                    for l in rf:
+                        l = l.strip()
+                        if "=" in l and not l.startswith("#"):
+                            k, v = l.split("=", 1)
+                            clean_k, clean_v = k.strip(), v.strip().strip("'\"")
+                            if clean_k and clean_v:
+                                parsed[clean_k] = clean_v
+                if parsed:
+                    curr_env = read_script_env(entry_script)
+                    curr_env.update(parsed)
+                    write_script_env(entry_script, curr_env)
+                    env_count += len(parsed)
+                try:
+                    os.remove(ef)
+                except Exception:
+                    pass
+                    
+        git_sync_to_github(f"Deploy new separate project: {next_proj_name}")
+        
+        launch_status = ""
+        if entry_script:
+            ok_run, run_msg = start_child_app(entry_script, force_restart=True)
+            launch_status = f"🟢 <b>Status:</b> <code>{entry_script}</code> is now <b>RUNNING!</b>" if ok_run else f"⚠️ <b>Status:</b> {run_msg}"
+            
+        success_msg = (
+            f"🚀 <b>New Project Deployed Successfully!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>Archive:</b> <code>{file_name}</code>\n"
+            f"📁 <b>Directory:</b> <code>scripts/{next_proj_name}/</code>\n"
+            f"🎯 <b>Detected Entry Script:</b> <code>{entry_script or 'None'}</code>\n"
+            f"{launch_status}\n"
+            f"📦 <b>Dependencies:</b> {'Installed packages' if found_reqs else 'None'}\n"
+            f"🔒 <b>Environment:</b> {str(env_count) + ' variables loaded' if env_count else 'None'}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Manage your new project using the buttons below:</i>"
+        )
+        buttons = []
+        if entry_script:
+            buttons.append([{"text": f"🛑 Stop {os.path.basename(entry_script)}", "callback_data": f"confirm_stop_prompt_{entry_script}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{entry_script}"}])
+            buttons.append([{"text": f"⚙️ Configure {os.path.basename(entry_script)} ENV", "callback_data": f"env_dash_{entry_script}"}])
+            buttons.append([{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{entry_script}"}])
+        buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}])
+        buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
+        
+        edit_tg_message(chat_id, message_id, success_msg, reply_markup={"inline_keyboard": buttons})
+
+    # 4e. Duplicate ZIP Project: 2. Update the Old
+    elif data.startswith("zip_update_"):
+        state = user_states.get(user_id, {})
+        staged_path = state.get("staging_path")
+        file_name = state.get("file_name", "project.zip")
+        zip_base = state.get("zip_base", "project")
+        
+        if not staged_path or not os.path.exists(staged_path):
+            answer_callback(callback_id, "Staged file expired. Please upload again.", show_alert=True)
+            return
+            
+        answer_callback(callback_id, f"Updating and replacing {zip_base}...")
+        user_states.pop(user_id, None)
+        
+        # 1. Stop old running processes & release file locks
+        stop_child_app(script_name=zip_base, clear_active=True)
+        time.sleep(0.5)
+        
+        # 2. Properly delete old files from disk and Git
+        old_target_dir = os.path.join(SCRIPTS_DIR, zip_base)
+        try:
+            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{zip_base}", zip_base], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+        if os.path.exists(old_target_dir):
+            import shutil
+            shutil.rmtree(old_target_dir, ignore_errors=True)
+            
+        old_venv = os.path.join(VENVS_DIR, zip_base)
+        if os.path.exists(old_venv):
+            import shutil
+            shutil.rmtree(old_venv, ignore_errors=True)
+            
+        # 3. Extract fresh new project code
+        import zipfile
+        os.makedirs(old_target_dir, exist_ok=True)
+        extracted_files = []
+        try:
+            with zipfile.ZipFile(staged_path, 'r') as zip_ref:
+                namelist = zip_ref.namelist()
+                top_dirs = {item.split('/')[0] for item in namelist if item and not item.startswith('/')}
+                if len(top_dirs) == 1 and all(item.startswith(list(top_dirs)[0] + '/') or item == list(top_dirs)[0] for item in namelist):
+                    for member in zip_ref.infolist():
+                        parts = member.filename.split('/', 1)
+                        if len(parts) > 1 and parts[1]:
+                            member.filename = parts[1]
+                            zip_ref.extract(member, old_target_dir)
+                else:
+                    zip_ref.extractall(old_target_dir)
+                extracted_files = namelist
+            try:
+                os.remove(staged_path)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                os.remove(staged_path)
+            except Exception:
+                pass
+            edit_tg_message(chat_id, message_id, f"❌ Failed to extract zip: {e}", reply_markup=get_main_menu_keyboard())
+            return
+            
+        entry_script = detect_project_entry_script(old_target_dir)
+        
+        found_reqs = []
+        found_envs = []
+        for root, _, fs in os.walk(old_target_dir):
+            for f in fs:
+                fp = os.path.join(root, f)
+                if "requirements" in f.lower() and f.endswith(".txt"):
+                    found_reqs.append(fp)
+                elif f.endswith(".env") or f == ".env":
+                    found_envs.append(fp)
+                    
+        req_count = 0
+        if found_reqs and entry_script:
+            for req in found_reqs:
+                check_and_install_reqs(req, clean_name=entry_script)
+                with open(req, "r", encoding="utf-8", errors="ignore") as rf:
+                    req_count += len([l for l in rf if l.strip() and not l.startswith("#")])
+                    
+        env_count = 0
+        if found_envs and entry_script:
+            for ef in found_envs:
+                parsed = {}
+                with open(ef, "r", encoding="utf-8", errors="ignore") as rf:
+                    for l in rf:
+                        l = l.strip()
+                        if "=" in l and not l.startswith("#"):
+                            k, v = l.split("=", 1)
+                            clean_k, clean_v = k.strip(), v.strip().strip("'\"")
+                            if clean_k and clean_v:
+                                parsed[clean_k] = clean_v
+                if parsed:
+                    curr_env = read_script_env(entry_script)
+                    curr_env.update(parsed)
+                    write_script_env(entry_script, curr_env)
+                    env_count += len(parsed)
+                try:
+                    os.remove(ef)
+                except Exception:
+                    pass
+                    
+        git_sync_to_github(f"Update and redeploy project: {zip_base}")
+        
+        launch_status = ""
+        if entry_script:
+            ok_run, run_msg = start_child_app(entry_script, force_restart=True)
+            launch_status = f"🟢 <b>Status:</b> <code>{entry_script}</code> is now <b>RUNNING!</b>" if ok_run else f"⚠️ <b>Status:</b> {run_msg}"
+            
+        success_msg = (
+            f"🔄 <b>Project Updated & Redeployed!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>Archive:</b> <code>{file_name}</code>\n"
+            f"📁 <b>Directory:</b> <code>scripts/{zip_base}/</code>\n"
+            f"🎯 <b>Detected Entry Script:</b> <code>{entry_script or 'None'}</code>\n"
+            f"{launch_status}\n"
+            f"📦 <b>Dependencies:</b> {'Installed packages' if found_reqs else 'None'}\n"
+            f"🔒 <b>Environment:</b> {str(env_count) + ' variables loaded' if env_count else 'None'}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Manage your updated project using the buttons below:</i>"
+        )
+        buttons = []
+        if entry_script:
+            buttons.append([{"text": f"🛑 Stop {os.path.basename(entry_script)}", "callback_data": f"confirm_stop_prompt_{entry_script}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{entry_script}"}])
+            buttons.append([{"text": f"⚙️ Configure {os.path.basename(entry_script)} ENV", "callback_data": f"env_dash_{entry_script}"}])
+            buttons.append([{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{entry_script}"}])
+        buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}])
+        buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
+        
+        edit_tg_message(chat_id, message_id, success_msg, reply_markup={"inline_keyboard": buttons})
+
+    # 4f. Cancel ZIP Upload
+    elif data.startswith("zip_cancel_"):
+        state = user_states.get(user_id, {})
+        staged_path = state.get("staging_path") if isinstance(state, dict) else None
+        if staged_path and os.path.exists(staged_path):
+            try:
+                os.remove(staged_path)
+            except Exception:
+                pass
+        user_states.pop(user_id, None)
+        answer_callback(callback_id, "Upload cancelled.")
+        edit_tg_message(chat_id, message_id, "❌ <b>Upload cancelled.</b> Existing projects were not modified.", reply_markup=get_main_menu_keyboard())
+
     # 5. Stop Script Menu
     elif data == "menu_stop":
         answer_callback(callback_id)
@@ -2670,10 +2929,10 @@ def handle_document_upload(chat_id, user_id, doc):
     scripts_path = os.path.join(SCRIPTS_DIR, file_name)
     root_path = os.path.join(WORKSPACE_DIR, file_name)
     
-    # 0. Check if uploading a .py file that is ALREADY RUNNING
+    # 0. Check if uploading a .py file that ALREADY EXISTS or is RUNNING
     if file_name.endswith(".py"):
         active = get_active_running_processes()
-        if file_name in active:
+        if os.path.exists(scripts_path) or file_name in active:
             # Stage download in workspace
             staging_path = os.path.join(WORKSPACE_DIR, f".staging_{user_id}_{int(time.time())}_{file_name}")
             send_tg_message(chat_id, f"📥 <b>Receiving {file_name}...</b>")
@@ -2688,11 +2947,6 @@ def handle_document_upload(chat_id, user_id, doc):
                 "staging_path": staging_path
             }
             
-            pdata = active[file_name]
-            cu_sec = int(time.time() - pdata["start_time"])
-            ch, cr = divmod(cu_sec, 3600)
-            cm, _ = divmod(cr, 60)
-            
             base, ext = os.path.splitext(file_name)
             idx = 2
             while os.path.exists(os.path.join(SCRIPTS_DIR, f"{base}_{idx}{ext}")) or f"{base}_{idx}{ext}" in active:
@@ -2700,18 +2954,17 @@ def handle_document_upload(chat_id, user_id, doc):
             next_inst_name = f"{base}_{idx}{ext}"
             
             text = (
-                f"✨ <b>Python Script Received:</b> <code>{file_name}</code>\n"
+                f"✨ <b>Existing Script Detected:</b> <code>{file_name}</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⚠️ <b>Instance Alert:</b> <code>{file_name}</code> is currently <b>RUNNING (PID: {pdata['pid']} | {ch}h {cm}m)</b>.\n\n"
-                "<i>Choose how you want to deploy this file:</i>\n\n"
-                f"• <b>🔀 Run Parallel:</b> Saves as <code>{next_inst_name}</code> and runs alongside the existing instance.\n"
-                f"• <b>🔄 Update & Restart:</b> Stops PID {pdata['pid']}, replaces code, and restarts immediately."
+                f"⚠️ <code>{file_name}</code> already exists in your workspace.\n\n"
+                "<i>Please choose how you want to deploy this file:</i>\n\n"
+                f"1️⃣ <b>Deploy New Project:</b> Saves as <code>{next_inst_name}</code> as a separate script.\n"
+                f"2️⃣ <b>Update the Old:</b> Replaces <code>{file_name}</code> and restarts immediately."
             )
             markup = {
                 "inline_keyboard": [
-                    [{"text": f"🔀 Run Parallel ({next_inst_name})", "callback_data": f"inst_parallel_{file_name}"}],
-                    [{"text": f"🔄 Replace & Restart (PID {pdata['pid']})", "callback_data": f"inst_replace_{file_name}"}],
-                    [{"text": "✏️ Save with Custom Name", "callback_data": f"inst_custom_{file_name}"}],
+                    [{"text": f"🚀 1. Deploy New Project ({next_inst_name})", "callback_data": f"inst_parallel_{file_name}"}],
+                    [{"text": f"🔄 2. Update the Old ({file_name})", "callback_data": f"inst_replace_{file_name}"}],
                     [{"text": "❌ Cancel Upload", "callback_data": f"inst_cancel_{file_name}"}]
                 ]
             }
@@ -2720,6 +2973,53 @@ def handle_document_upload(chat_id, user_id, doc):
 
     # Normal Download for non-conflicting files
     is_zip = file_name.endswith(".zip")
+    
+    # 0b. If uploading a .zip project archive, check if project already exists
+    if is_zip:
+        zip_base = file_name[:-4]
+        target_dir = os.path.join(SCRIPTS_DIR, zip_base)
+        active = get_active_running_processes()
+        is_zip_running = any(k.startswith(f"{zip_base}/") or k == zip_base or os.path.dirname(k) == zip_base for k in active.keys())
+        
+        if os.path.exists(target_dir) or is_zip_running:
+            staging_path = os.path.join(WORKSPACE_DIR, f".staging_{user_id}_{int(time.time())}_{file_name}")
+            send_tg_message(chat_id, f"📥 <b>Receiving {file_name}...</b>")
+            ok, err = download_tg_file(file_id, staging_path)
+            if not ok:
+                send_tg_message(chat_id, f"❌ Download failed: {err}")
+                return
+                
+            idx = 2
+            while os.path.exists(os.path.join(SCRIPTS_DIR, f"{zip_base}_{idx}")) or any(k.startswith(f"{zip_base}_{idx}/") or k == f"{zip_base}_{idx}" for k in active.keys()):
+                idx += 1
+            next_proj_name = f"{zip_base}_{idx}"
+            
+            user_states[user_id] = {
+                "action": "PENDING_DUPLICATE_ZIP_UPLOAD",
+                "file_name": file_name,
+                "zip_base": zip_base,
+                "next_proj_name": next_proj_name,
+                "staging_path": staging_path
+            }
+            
+            prompt_text = (
+                f"📦 <b>Existing Project Detected:</b> <code>{file_name}</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚠️ A project named <code>scripts/{zip_base}/</code> already exists in your workspace.\n\n"
+                "<i>Please choose how you want to deploy this upload:</i>\n\n"
+                f"1️⃣ <b>Deploy New Project:</b> Deploys as a separate project (<code>scripts/{next_proj_name}/</code>).\n"
+                f"2️⃣ <b>Update the Old:</b> Properly deletes the old <code>{zip_base}</code> and deploys fresh."
+            )
+            markup = {
+                "inline_keyboard": [
+                    [{"text": f"🚀 1. Deploy New Project ({next_proj_name})", "callback_data": f"zip_new_{user_id}"}],
+                    [{"text": f"🔄 2. Update the Old ({zip_base})", "callback_data": f"zip_update_{user_id}"}],
+                    [{"text": "❌ Cancel Upload", "callback_data": f"zip_cancel_{user_id}"}]
+                ]
+            }
+            send_tg_message(chat_id, prompt_text, reply_markup=markup)
+            return
+
     download_dest = os.path.join(WORKSPACE_DIR, f".staging_{user_id}_{int(time.time())}_{file_name}") if is_zip else scripts_path
     
     send_tg_message(chat_id, f"📥 <b>Receiving {file_name}...</b>")
@@ -2743,18 +3043,11 @@ def handle_document_upload(chat_id, user_id, doc):
     
     current_state = user_states.get(user_id)
     
-    # 0b. If uploaded a .zip project archive
+    # Fresh .zip project archive deployment
     if is_zip:
         import zipfile
         zip_base = file_name[:-4]
         
-        # Stop any existing running instance of this project so newly uploaded code is deployed cleanly!
-        active = get_active_running_processes()
-        is_zip_running = any(k.startswith(f"{zip_base}/") or k == zip_base or os.path.dirname(k) == zip_base for k in active.keys())
-        if is_zip_running:
-            stop_child_app(script_name=zip_base, clear_active=False)
-            time.sleep(0.5)
-
         send_tg_message(chat_id, f"📦 <b>Unpacking Project Archive:</b> <code>{file_name}</code>...")
         
         extracted_files = []
