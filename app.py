@@ -2517,86 +2517,102 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         }
         edit_tg_message(chat_id, message_id, wipe_text, reply_markup=markup)
 
-    # 10c. Delete Single File/Folder Prompt (Confirmation)
-    elif data.startswith("file_del_") and not data.startswith("file_del_all"):
-        fname = data.replace("file_del_", "")
-        answer_callback(callback_id, f"Preparing deletion for {fname}...")
-        import html
-        esc_fname = html.escape(fname)
-        text = (
-            f"⚠️ <b>Confirm Permanent Deletion</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Are you sure you want to permanently delete <code>scripts/{esc_fname}</code>?\n\n"
-            "🔴 <i>Any active process, venv, and environment variables will be completely wiped.</i>"
-        )
-        markup = {
-            "inline_keyboard": [
-                [{"text": f"🗑️ Yes, Delete {fname[:25]}", "callback_data": f"do_delete_file_{fname}"}],
-                [{"text": "❌ Cancel", "callback_data": "menu_files"}]
-            ]
-        }
-        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
-
-    # 10d. Do Delete Single File/Folder Execution
-    elif data.startswith("do_delete_file_") and not data.startswith("do_delete_all_files"):
-        fname = data.replace("do_delete_file_", "")
-        target_path = os.path.join(SCRIPTS_DIR, fname)
-        if not os.path.exists(target_path):
-            target_path = os.path.join(WORKSPACE_DIR, fname)
-
-        # 1. Stop matching process (without triggering duplicate git sync)
+    # 10c. Direct & Fast Delete Single File/Folder Execution
+    elif data.startswith("file_del_") or data.startswith("do_delete_file_"):
+        if data.startswith("do_delete_file_"):
+            fname = data.replace("do_delete_file_", "")
+        else:
+            fname = data.replace("file_del_", "")
+        
+        if fname in ["all", "all_prompt"]:
+            # Handled by wipe workspace
+            return
+            
+        # 1. Answer callback INSTANTLY so Telegram spinner immediately clears!
+        answer_callback(callback_id, f"🗑️ Deleting {fname}...", show_alert=False)
+        
+        # 2. Identify candidate paths to delete on disk
+        candidates_to_remove = [
+            os.path.join(SCRIPTS_DIR, fname),
+            os.path.join(WORKSPACE_DIR, fname),
+        ]
+        
+        # If fname is a nested path like "Ghidrabot vps/bot.py" or "xxtgdriveapibot/main.py", also check the parent project directory
+        clean_fname = fname.replace("\\", "/").strip("/")
+        if "/" in clean_fname:
+            parent_dir_name = clean_fname.split("/")[0]
+            candidates_to_remove.append(os.path.join(SCRIPTS_DIR, parent_dir_name))
+            candidates_to_remove.append(os.path.join(WORKSPACE_DIR, parent_dir_name))
+        
+        # Also stem without .py
+        base_stem = clean_fname.rsplit(".", 1)[0]
+        candidates_to_remove.append(os.path.join(SCRIPTS_DIR, base_stem))
+        
+        # 3. Stop running processes matching this script or its directory
         stop_child_app(script_name=fname, clear_active=False)
+        
+        # 4. Clean up disk
+        import shutil
+        deleted_anything = False
+        for target_path in candidates_to_remove:
+            if os.path.exists(target_path):
+                try:
+                    if os.path.isdir(target_path):
+                        shutil.rmtree(target_path, ignore_errors=True)
+                    else:
+                        os.remove(target_path)
+                    deleted_anything = True
+                except Exception as e_del:
+                    logger.error(f"Error removing {target_path}: {e_del}")
 
-        # 2. Update config active_scripts
+        # Clean companion files (.env, .requirements.txt, etc.)
+        for extra in [f"{base_stem}.requirements.txt", f"{base_stem}.env", f"{clean_fname}.env", f"{clean_fname}.requirements.txt"]:
+            extra_p = os.path.join(SCRIPTS_DIR, extra)
+            if os.path.exists(extra_p):
+                try:
+                    os.remove(extra_p)
+                except Exception:
+                    pass
+
+        # 5. Clean up isolated virtualenvs
+        venv_slugs = [
+            re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_fname),
+            re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_stem),
+        ]
+        if "/" in clean_fname:
+            venv_slugs.append(re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_fname.split("/")[0]))
+            
+        for vslug in venv_slugs:
+            v_dir = os.path.join(VENVS_DIR, vslug)
+            if os.path.exists(v_dir):
+                try:
+                    shutil.rmtree(v_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+        # 6. Clean up config active_scripts and vault
         active_list = list(get_active_running_processes().keys())
         config["active_scripts"] = active_list
 
-        # 3. Clean up from encrypted vault and config in real time
         vault = load_env_vault()
-        keys_to_del = [k for k in list(vault.keys()) if k == fname or k.startswith(f"{fname}/") or os.path.basename(k) == fname or os.path.dirname(k) == fname]
+        keys_to_del = [
+            k for k in list(vault.keys()) 
+            if k == clean_fname 
+            or k == fname 
+            or k.startswith(f"{clean_fname}/") 
+            or (("/" in clean_fname) and (k.startswith(clean_fname.split("/")[0]) or os.path.dirname(k) == clean_fname.split("/")[0]))
+            or os.path.basename(k) == clean_fname
+            or os.path.basename(k) == base_stem
+        ]
         for k in keys_to_del:
             vault.pop(k, None)
         save_env_vault(vault)
         save_config(config)
 
-        # 4. Clean up isolated virtualenv
-        venv_slug = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', fname)
-        v_dir = os.path.join(VENVS_DIR, venv_slug)
-        if os.path.exists(v_dir):
-            import shutil
-            try:
-                shutil.rmtree(v_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-        # 5. Delete target file or folder from disk
-        deleted_successfully = False
-        if os.path.exists(target_path):
-            import shutil
-            try:
-                if os.path.isdir(target_path):
-                    shutil.rmtree(target_path, ignore_errors=True)
-                else:
-                    os.remove(target_path)
-                deleted_successfully = True
-            except Exception as e_del:
-                logger.error(f"Error removing {target_path}: {e_del}")
-
-        # Also delete companion files like .env or .requirements.txt
-        base_n = fname.rsplit('.', 1)[0]
-        for extra in [f"{base_n}.requirements.txt", f"{base_n}.env", f"{fname}.env", f"{fname}.requirements.txt"]:
-            extra_p = os.path.join(SCRIPTS_DIR, extra)
-            if os.path.exists(extra_p):
-                try:
-                    os.remove(extra_p)
-                    deleted_successfully = True
-                except Exception:
-                    pass
-
-        # 6. Single atomic background cloud sync
+        # 7. Single thread-safe background sync to cloud
         threading.Thread(target=git_sync_to_github, args=(f"Deleted scripts/{fname} via Telegram",), daemon=True).start()
-        
-        answer_callback(callback_id, f"🗑️ {fname} deleted successfully!", show_alert=True)
+
+        # 8. Refresh Telegram View in Real Time!
         show_files_view(chat_id, message_id)
 
     # 11. Pip prompt
