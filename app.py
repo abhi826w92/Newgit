@@ -270,30 +270,30 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
             # 1. Stage all changes including deletions (-A)
             subprocess.run(["git", "add", "-A"], check=True)
             
-            # 2. Secret & Archive Shield: unstage any accidental archives or plain .env files
-            subprocess.run(["git", "rm", "-r", "--cached", "*.zip", "*.tar", "*.gz", "*.env", ".staging_*"], capture_output=True)
-            subprocess.run(["git", "reset", "*.zip", "*.tar", "*.gz", "*.env", ".staging_*"], capture_output=True)
-            
-            # 3. Commit local state (including deletions) BEFORE pulling/rebasing
+            # 2. Check if there are changes to commit
             status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
-            if status.stdout.strip():
-                subprocess.run(["git", "commit", "-m", commit_message], check=True)
+            if not status.stdout.strip():
+                logger.info("No git changes to commit.")
+                return True, "All files up to date."
+                
+            subprocess.run(["git", "commit", "-m", commit_message], check=True)
             
-            # 4. Push changes directly
+            # 3. Push changes directly to GitHub
             push_res = subprocess.run(["git", "push", remote_url, "main"], capture_output=True, text=True)
             if push_res.returncode == 0:
-                logger.info("Auto-sync to cloud complete.")
+                logger.info(f"Auto-sync to cloud complete: {commit_message}")
                 return True, "Cloud sync complete! All changes backed up."
             else:
-                # If rejected, rebase with -X ours so local deletions/new code take precedence
+                # Rebase with -X ours so local deletions/updates take precedence
                 subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, "main"], capture_output=True)
                 push_res = subprocess.run(["git", "push", remote_url, "main"], capture_output=True, text=True)
                 if push_res.returncode == 0:
-                    logger.info("Auto-sync to cloud complete after rebase.")
+                    logger.info(f"Auto-sync to cloud complete after rebase: {commit_message}")
                     return True, "Cloud sync complete! All changes backed up."
                 logger.error(f"Git push error: {push_res.stderr}")
                 return False, f"Cloud Sync error: {push_res.stderr[-200:]}"
         except Exception as e:
+            logger.error(f"git_sync_to_github error: {e}")
             return False, str(e)
 
 # ---------------------------------------------------------------------------
