@@ -568,6 +568,35 @@ def child_watchdog(proc, fname):
     
     if config.get("admin_ids"):
         if ret != 0:
+            # Check for Telethon / Pyrogram incompatible or corrupted SQLite session file
+            if "ValueError: too many values to unpack (expected 5)" in recent_err or "telethon.sessions.sqlite" in recent_err or "SQLiteSession" in recent_err or "database disk image is malformed" in recent_err:
+                retry_key = f"session_fix_{fname}"
+                attempts = autofix_attempts.get(retry_key, 0)
+                if attempts < 2:
+                    autofix_attempts[retry_key] = attempts + 1
+                    logger.info(f"🛠️ [Auto-Self-Heal] Incompatible Telethon session detected in {fname}. Resetting session files and restarting...")
+                    notify_all_admins(
+                        f"🛠️ <b>Self-Healing System Active:</b>\n"
+                        f"Incompatible <code>.session</code> SQLite schema detected in <code>{fname}</code>.\n"
+                        f"🔄 Automatically resetting corrupted session file and restarting..."
+                    )
+                    
+                    script_dir = os.path.dirname(os.path.join(SCRIPTS_DIR, fname)) or SCRIPTS_DIR
+                    if os.path.exists(script_dir):
+                        for f in os.listdir(script_dir):
+                            if f.endswith(".session") or f.endswith(".session-journal"):
+                                try:
+                                    os.remove(os.path.join(script_dir, f))
+                                    logger.info(f"Removed incompatible session file: {f}")
+                                except Exception as e:
+                                    logger.error(f"Error removing session file {f}: {e}")
+                                    
+                    time.sleep(1.0)
+                    ok_restart, restart_msg = start_child_app(fname, force_restart=True)
+                    if ok_restart:
+                        notify_all_admins(f"🟢 <b>Auto-Healing Succeeded!</b>\n<code>{fname}</code> is now running fresh with a newly initialized session.")
+                        return
+
             missing_mod = extract_missing_module(recent_err)
             if missing_mod:
                 pip_pkg = map_module_to_pip_pkg(missing_mod)
