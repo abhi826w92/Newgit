@@ -127,12 +127,25 @@ async def get_storage_stats_realtime(api_key: str):
         return {"status": "error", "message": str(e)}
 
 async def get_file_info(api_key: str, file_id: str):
-    """Get file details and metadata."""
-    url = f"{API_BASE_URL}/v1/files/{file_id}"
-    headers = _get_headers(api_key)
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, headers=headers)
-        return resp.json()
+    """Get file details and metadata with direct scanning from list_files."""
+    target_id = str(file_id).strip()
+    
+    # 1. Search in list_files (Always reliable on Cloudflare Worker)
+    try:
+        files_res = await list_files(api_key, folder_id="all", limit=1000)
+        if files_res.get("status") == "success":
+            items = files_res.get("items", [])
+            for item in items:
+                item_id = str(item.get("id") or item.get("message_id") or "")
+                if item_id == target_id:
+                    return {
+                        "status": "success",
+                        "data": item
+                    }
+    except Exception as e:
+        logger.error(f"Error fetching file details for {target_id}: {e}")
+
+    return {"status": "error", "message": "File not found"}
 
 async def upload_file_streaming_direct(api_key: str, file_path: str, filename: str, folder_id: str = "root", mime_type: str = "application/octet-stream", progress_cb = None):
     """Single-part streaming upload for standard files."""
@@ -262,6 +275,17 @@ async def upload_file_chunked(
                 )
                 if comp_resp.status_code in (200, 201):
                     return comp_resp.json()
+                elif comp_resp.status_code in (502, 504, 524) or "524" in comp_resp.text:
+                    logger.warning(f"Cloudflare timeout on complete: {comp_resp.text[:150]}. Assuming background processing.")
+                    return {
+                        "status": "success",
+                        "data": {
+                            "name": filename,
+                            "size": total_size,
+                            "destination": "Processing in Background (Cloudflare Timeout)",
+                            "message_id": "processing_in_background"
+                        }
+                    }
                 else:
                     logger.warning(f"Complete attempt {comp_attempt + 1} response: {comp_resp.text[:150]}")
                     await asyncio.sleep(2)

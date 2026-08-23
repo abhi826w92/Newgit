@@ -48,11 +48,19 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bot_sessions (
+            session_key TEXT PRIMARY KEY,
+            session_data TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
     # Auto-migrations for existing databases
     migrations = [
         "ALTER TABLE users ADD COLUMN api_id TEXT",
         "ALTER TABLE users ADD COLUMN api_hash TEXT",
+        "ALTER TABLE users ADD COLUMN session_string TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN current_folder_name TEXT DEFAULT 'Root (Saved Messages)'"
     ]
     for mig in migrations:
@@ -376,3 +384,60 @@ def update_user_activity(user_id: int, username: str = None, first_name: str = N
     """, (username, first_name, user_id))
     conn.commit()
     conn.close()
+
+def get_bot_session(session_key: str = "permanent_bot") -> str:
+    """Get the saved Telegram StringSession from SQLite database."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_data FROM bot_sessions WHERE session_key = ?", (session_key,))
+    row = cursor.fetchone()
+    conn.close()
+    if row and row["session_data"]:
+        return row["session_data"]
+    return ""
+
+def save_bot_session(session_data: str, session_key: str = "permanent_bot"):
+    """Persist Telegram StringSession into SQLite database."""
+    if not session_data:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO bot_sessions (session_key, session_data, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(session_key) DO UPDATE SET
+            session_data = excluded.session_data,
+            updated_at = CURRENT_TIMESTAMP
+    """, (session_key, session_data))
+    conn.commit()
+    conn.close()
+    logger.info("Persisted Telegram StringSession into SQLite database.")
+
+def set_user_session(user_id: int, session_str: str):
+    """Encrypt and securely save personal StringSession for user in SQLite database."""
+    if not session_str:
+        return
+    enc_session = encrypt_api_key(session_str.strip())
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO users (user_id, session_string, last_active)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            session_string = excluded.session_string,
+            last_active = CURRENT_TIMESTAMP
+    """, (user_id, enc_session))
+    conn.commit()
+    conn.close()
+    logger.info(f"Saved encrypted StringSession for user {user_id} in database.")
+
+def get_user_session(user_id: int) -> str:
+    """Get decrypted personal StringSession for user from database."""
+    user = get_user(user_id)
+    if user:
+        raw_session = user.get("session_string")
+        if raw_session:
+            return decrypt_api_key(raw_session)
+    return ""
+
+

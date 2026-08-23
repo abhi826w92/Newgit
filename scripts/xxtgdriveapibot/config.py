@@ -1,14 +1,19 @@
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 
 # Load environment variables from .env file if present
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
-if ENV_PATH.exists():
-    load_dotenv(dotenv_path=ENV_PATH)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8486999738:AAEZJb-n0U0Y57uL5L541VwD5vF4kQ_0x9w").strip()
+try:
+    from dotenv import load_dotenv
+    if ENV_PATH.exists():
+        load_dotenv(dotenv_path=ENV_PATH)
+except ImportError:
+    pass
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8486999738:AAEXkcxrILtF2AH2YfPesT1vwUAhPKiRVYs").strip()
+BOT_SESSION_STRING = os.getenv("BOT_SESSION_STRING", "").strip()
 API_ID = int(os.getenv("API_ID", "29116029"))
 API_HASH = os.getenv("API_HASH", "867fafeeabc20a75163ef2ddbd877f70").strip()
 

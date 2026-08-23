@@ -1,14 +1,43 @@
+import sys
+import subprocess
+
+# Auto-install missing dependencies on first run (VPS / GitHub Runner self-bootstrap)
+REQUIRED_PACKAGES = {
+    "telethon": "telethon>=1.38.0",
+    "httpx": "httpx>=0.28.0",
+    "aiohttp": "aiohttp>=3.10.0",
+    "dotenv": "python-dotenv>=1.0.0"
+}
+
+missing_pkgs = []
+for import_name, pkg_spec in REQUIRED_PACKAGES.items():
+    try:
+        __import__(import_name)
+    except ImportError:
+        missing_pkgs.append(pkg_spec)
+
+if missing_pkgs:
+    print(f"📦 Auto-installing missing dependencies: {', '.join(missing_pkgs)}...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_pkgs])
+        print("✅ All dependencies installed successfully!")
+    except Exception as e:
+        print(f"⚠️ Notice: pip auto-install returned: {e}")
+
 import logging
 import asyncio
 import os
 import time
 import json
 from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
 from telethon.tl.types import Document, MessageMediaDocument, MessageMediaPhoto
 
-from config import BOT_TOKEN, API_ID, API_HASH, ADMIN_IDS, TEMP_DIR, API_BASE_URL
+from config import BOT_TOKEN, BOT_SESSION_STRING, API_ID, API_HASH, ADMIN_IDS, TEMP_DIR, API_BASE_URL
 from database import (
     init_db,
+    get_bot_session,
+    save_bot_session,
     get_user_api_key,
     set_user_api_key,
     delete_user_api_key,
@@ -107,8 +136,11 @@ try:
 except Exception as patch_err:
     logger.debug(f"Telethon safety patch notice: {patch_err}")
 
-# Initialize Telethon Client (Permanent Session 'tgdrive_permanent_bot')
-client = TelegramClient('tgdrive_permanent_bot', API_ID, API_HASH)
+# Initialize Telethon Client using Database / Env StringSession (Zero Disk Files)
+init_db()
+_admin_env_session = (BOT_SESSION_STRING or "").strip()
+_db_session_str = _admin_env_session or get_bot_session("permanent_bot")
+client = TelegramClient(StringSession(_db_session_str), API_ID, API_HASH)
 
 PER_PAGE = 6
 
@@ -1000,20 +1032,40 @@ async def callback_handler(event):
 
     # File View (file_view:<file_id>:<folder_id>:<page>)
     if data.startswith("file_view:"):
-        await event.answer()
+        await event.answer("📄 Loading File Details...")
         parts = data.split(":")
         file_id = parts[1]
         folder_id = parts[2] if len(parts) > 2 else "all"
         page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
 
         try:
-            res = await get_file_info(api_key, file_id)
-            if res.get("status") == "success":
-                file_data = res.get("data", res)
+            # 1. Fast Cache Lookup (Instant 0ms)
+            file_data = None
+            cached_files = file_cache.get(user_id) or []
+            for f in cached_files:
+                if str(f.get("id") or f.get("message_id") or "") == str(file_id):
+                    file_data = f
+                    break
+
+            # 2. If not in cache, fetch via get_file_info (with automatic fallback to list_files)
+            if not file_data:
+                res = await get_file_info(api_key, file_id)
+                if res.get("status") == "success":
+                    file_data = res.get("data", res)
+
+            # 3. If still not found, fresh scan
+            if not file_data:
+                fresh_items = await get_cached_or_fetch_files(api_key, user_id, force_refresh=True)
+                for f in fresh_items:
+                    if str(f.get("id") or f.get("message_id") or "") == str(file_id):
+                        file_data = f
+                        break
+
+            if file_data:
                 name = file_data.get("name", "Untitled")
                 size = file_data.get("size", 0)
-                mime = file_data.get("mimeType", "N/A")
-                created_at = file_data.get("created_at")
+                mime = file_data.get("mimeType") or file_data.get("mime_type") or "application/octet-stream"
+                created_at = file_data.get("created_at") or file_data.get("date")
                 download_url = build_download_url(file_id, api_key)
                 is_starred = file_data.get("starred", False)
                 dest = file_data.get("destination", "Telegram Cloud ('Saved Messages')")
@@ -1026,13 +1078,15 @@ async def callback_handler(event):
                     f"📑 <b>MIME Type:</b> <code>{clean_html(mime)}</code>\n"
                     f"🆔 <b>Message ID:</b> <code>#{file_id}</code>\n"
                     f"📅 <b>Uploaded:</b> {format_date(created_at)}\n"
-                    f"📍 <b>Storage:</b> {clean_html(dest)}\n"
+                    f"📍 <b>Storage:</b> {clean_html(dest)}\n\n"
+                    f"🔗 <b>Direct Fast Download Link:</b>\n<code>{download_url}</code>"
                 )
                 kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=folder_id, page=page)
                 await event.edit(text, buttons=kb, parse_mode="html")
             else:
-                await event.edit(f"❌ File not found: {clean_html(res.get('message', 'Error'))}", buttons=back_to_main_kb(), parse_mode="html")
+                await event.edit(f"❌ <b>File #{file_id} not found on TG Drive Cloud.</b>", buttons=back_to_main_kb(), parse_mode="html")
         except Exception as e:
+            logger.error(f"Error in file_view: {e}")
             await event.edit(f"❌ Error: {clean_html(str(e))}", buttons=back_to_main_kb(), parse_mode="html")
         return
 
@@ -1060,17 +1114,27 @@ async def callback_handler(event):
     # Send File directly in chat
     if data.startswith("fsend:"):
         file_id = data.split(":")[1]
-        await event.answer("📥 Fetching & sending file to chat...", alert=False)
+        await event.answer("📥 Fetching & streaming file to chat...", alert=False)
         try:
-            res = await get_file_info(api_key, file_id)
-            if res.get("status") == "success":
-                file_data = res.get("data", res)
+            file_data = None
+            cached_files = file_cache.get(user_id) or []
+            for f in cached_files:
+                if str(f.get("id") or f.get("message_id") or "") == str(file_id):
+                    file_data = f
+                    break
+
+            if not file_data:
+                res = await get_file_info(api_key, file_id)
+                if res.get("status") == "success":
+                    file_data = res.get("data", res)
+
+            if file_data:
                 file_name = file_data.get("name", f"file_{file_id}")
                 download_url = build_download_url(file_id, api_key)
                 
-                status_msg = await event.respond(f"⏳ <i>Sending {clean_html(file_name)} to this chat...</i>", parse_mode="html")
+                status_msg = await event.respond(f"⏳ <i>Streaming {clean_html(file_name)} to this chat...</i>", parse_mode="html")
                 try:
-                    async with httpx.AsyncClient(timeout=180.0) as http_c:
+                    async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as http_c:
                         dl_resp = await http_c.get(download_url)
                         if dl_resp.status_code == 200:
                             await client.send_file(
@@ -1668,17 +1732,25 @@ def main():
     force_purge_temp_storage(0)
     register_cleanup_hooks()
 
+    admin_session_str = (BOT_SESSION_STRING or "").strip() or get_bot_session("permanent_bot")
+    if admin_session_str:
+        client.session = StringSession(admin_session_str)
+
     print("========================================")
     print("🚀 TG Drive MTProto Bot is Starting...")
+    print("🔥 Build Version: v3.4.0 [HYBRID ENV/DB ENCRYPTED SESSION ENGINE]")
     print(f"🤖 Bot Token: {BOT_TOKEN[:10]}...")
     print("⚡ 2GB+ File Upload Engine: ACTIVE (Telethon MTProto)")
     print("📊 Real-Time Visual Loading Progress: ACTIVE")
     print("⚡ Ultra-Fast Memory Cache: ACTIVE")
     print("🧹 Force Storage Cleaner & Crash Purge: ACTIVE")
-    print("🔒 Session: Permanent (tgdrive_permanent_bot.session)")
+    print("🔒 Admin Session: .env / SQLite (Dual-Tier Permanent)")
+    print("🔒 User Sessions: AES-256 PBKDF2 Encrypted in SQLite DB")
     print("========================================")
     
     client.start(bot_token=BOT_TOKEN)
+    # Persist session string in database
+    save_bot_session(client.session.save(), "permanent_bot")
     logger.info("Bot is running and listening for events...")
 
     # Start periodic background cleaner
