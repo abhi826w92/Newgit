@@ -264,29 +264,29 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
                     pass
 
             remote_url = f"https://{GH_PAT}@github.com/{REPO}.git"
-            subprocess.run(["git", "config", "user.name", "TelegramController"], check=True)
-            subprocess.run(["git", "config", "user.email", "bot@controller.local"], check=True)
+            subprocess.run(["git", "config", "user.name", "TelegramController"], cwd=WORKSPACE_DIR, check=True)
+            subprocess.run(["git", "config", "user.email", "bot@controller.local"], cwd=WORKSPACE_DIR, check=True)
             
             # 1. Stage all changes including deletions (-A)
-            subprocess.run(["git", "add", "-A"], check=True)
+            subprocess.run(["git", "add", "-A"], cwd=WORKSPACE_DIR, check=True)
             
             # 2. Check if there are changes to commit
-            status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
             if not status.stdout.strip():
                 logger.info("No git changes to commit.")
                 return True, "All files up to date."
                 
-            subprocess.run(["git", "commit", "-m", commit_message], check=True)
+            subprocess.run(["git", "commit", "-m", commit_message], cwd=WORKSPACE_DIR, check=True)
             
             # 3. Push changes directly to GitHub
-            push_res = subprocess.run(["git", "push", remote_url, "main"], capture_output=True, text=True)
+            push_res = subprocess.run(["git", "push", remote_url, "main"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
             if push_res.returncode == 0:
                 logger.info(f"Auto-sync to cloud complete: {commit_message}")
                 return True, "Cloud sync complete! All changes backed up."
             else:
-                # Rebase with -X ours so local deletions/updates take precedence
-                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, "main"], capture_output=True)
-                push_res = subprocess.run(["git", "push", remote_url, "main"], capture_output=True, text=True)
+                # Rebase with -X ours so local deletions/updates strictly take precedence
+                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, "main"], cwd=WORKSPACE_DIR, capture_output=True)
+                push_res = subprocess.run(["git", "push", remote_url, "main"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
                 if push_res.returncode == 0:
                     logger.info(f"Auto-sync to cloud complete after rebase: {commit_message}")
                     return True, "Cloud sync complete! All changes backed up."
@@ -1598,20 +1598,26 @@ def save_env_vault(vault):
         pass
 
 def restore_all_env_vaults_on_boot():
-    """Unpacks all encrypted environments locally on runner boot."""
+    """Unpacks all encrypted environments locally on runner boot ONLY for existing scripts/projects."""
     vault = load_env_vault()
-    for script_name, stored_enc in vault.items():
+    keys_to_clean = []
+    for script_name, stored_enc in list(vault.items()):
         if not stored_enc:
             continue
-        clean = script_name.replace("scripts/", "").lstrip("/")
+        clean = script_name.replace("scripts/", "").lstrip("/").replace("\\", "/")
         base_name = os.path.basename(clean)
-        if base_name.endswith(".py"):
-            base_name = base_name[:-3]
         dir_name = os.path.dirname(clean)
-        target_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else SCRIPTS_DIR
-        os.makedirs(target_dir, exist_ok=True)
         
-        # stored_enc is an encrypted JSON string containing all variables
+        # Check if the script or project directory actually exists on disk
+        script_file = os.path.join(SCRIPTS_DIR, clean)
+        project_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else None
+        
+        # If neither script file nor project directory exists, it is an orphaned deleted vault entry!
+        if not os.path.exists(script_file) and not (project_dir and os.path.exists(project_dir)):
+            keys_to_clean.append(script_name)
+            continue
+            
+        target_dir = project_dir if project_dir else SCRIPTS_DIR
         decrypted_json_str = decrypt_secret_data(stored_enc)
         if not decrypted_json_str:
             continue
@@ -1623,6 +1629,12 @@ def restore_all_env_vaults_on_boot():
                     f.write(f"{k}={v}\n")
         except Exception as e:
             logger.error(f"Error unpacking vault on boot for {script_name}: {e}")
+            
+    # Purge orphaned keys from vault
+    if keys_to_clean:
+        for k in keys_to_clean:
+            vault.pop(k, None)
+        save_env_vault(vault)
 
 def read_script_env(py_filename):
     """Reads environment variables from encrypted vault first (source of truth), then local .env."""
