@@ -5,6 +5,8 @@
   ],
   "active_scripts": [],
   "auto_run_file": null,
-  "env_vault": {},
+  "env_vault": {
+    "Ghidrabot vps/bot.py": "NkV8zsZatPLfUZx/VH0m09TrwZashcykIff5ZtnGH2GbWLBCrmKc8aRpBqZ6y62UxD8r46V/MSXPvkd03ATKNtuExwYaP7Wi4tmcEevwyXOZZGqlBfUGZPLeSDxVqaTnIaQrTP+nH4Dz9KOsXFMuNkKdomCCLko3wAQ5elgTO9MH7361DloLZ094Fv1fylZpNsualEUu0n7KMJg4rvSSZ87MgAhZ3C9DqCTu8pyo2L88ysZ61ouMoquAkOwfh4cw50/fRAa98nvF9c/KURhkxS5dclHi4nX/GJpfF6H586Xh8adyJ5hEShGIxjGUOGLMsSGMrTntIS7ytBvrtoOoJqptYJi+1cTkNyJZNSjCsKyYWZnQHM0YkAFFRCIudDVTtBXQSrZF2Gjy3oSZNrcFYxti1C2OoKUMGB+iW+GUzA8zWQBaGBAUSVqKxf5fAt37"
+  },
   "active_script": null
 }
