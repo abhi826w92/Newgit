@@ -5,8 +5,7 @@
   ],
   "active_scripts": [
     "Ghidrabot vps/bot.py",
-    "tgdriveapi-python (3)/app.py",
-    "xxtgdriveapibot/main.py"
+    "tgdriveapi-python (3)/app.py"
   ],
   "auto_run_file": null,
   "env_vault": {
