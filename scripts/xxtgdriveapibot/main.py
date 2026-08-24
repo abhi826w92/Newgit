@@ -1738,14 +1738,25 @@ def main():
     force_purge_temp_storage(0)
     register_cleanup_hooks()
 
-    admin_session_str = (BOT_SESSION_STRING or "").strip() or get_bot_session("permanent_bot")
+    target_bot_id = int(BOT_TOKEN.split(":")[0]) if ":" in BOT_TOKEN else 0
+    saved_token_bot_id = get_bot_session("active_bot_id")
+    
+    # If BOT_TOKEN changed to a different bot ID, load specific session or start fresh
+    if saved_token_bot_id and str(saved_token_bot_id) != str(target_bot_id):
+        logger.info(f"Bot Token changed from {saved_token_bot_id} to {target_bot_id}. Loading fresh session for new bot account...")
+        admin_session_str = (BOT_SESSION_STRING or "").strip() or get_bot_session(f"bot_{target_bot_id}")
+    else:
+        admin_session_str = (BOT_SESSION_STRING or "").strip() or get_bot_session(f"bot_{target_bot_id}") or get_bot_session("permanent_bot")
+
     if admin_session_str:
         client.session = StringSession(admin_session_str)
+    else:
+        client.session = StringSession("")
 
     print("========================================")
     print("🚀 TG Drive MTProto Bot is Starting...")
-    print("🔥 Build Version: v3.5.0 [CRASH-PROOF PERSISTENCE & AUTO-RECOVERY DB ENGINE]")
-    print(f"🤖 Bot Token: {BOT_TOKEN[:10]}...")
+    print("🔥 Build Version: v3.6.0 [DYNAMIC BOT TOKEN AUTO-DETECTION]")
+    print(f"🤖 Target Bot ID: {target_bot_id} | Token: {BOT_TOKEN[:10]}...")
     print("⚡ 2GB+ File Upload Engine: ACTIVE (Telethon MTProto)")
     print("📊 Real-Time Visual Loading Progress: ACTIVE")
     print("⚡ Ultra-Fast Memory Cache: ACTIVE")
@@ -1755,10 +1766,24 @@ def main():
     print("========================================")
     
     client.start(bot_token=BOT_TOKEN)
-    # Persist session string in database
-    save_bot_session(client.session.save(), "permanent_bot")
+    me = client.loop.run_until_complete(client.get_me())
+
+    # Check if loaded session belonged to an old bot
+    if target_bot_id and me.id != target_bot_id:
+        logger.warning(f"Session had old bot @{me.username} ({me.id}). Re-authenticating with target bot account ({target_bot_id})...")
+        client.disconnect()
+        client.session = StringSession("")
+        client.start(bot_token=BOT_TOKEN)
+        me = client.loop.run_until_complete(client.get_me())
+
+    # Persist session strings in database
+    current_session = client.session.save()
+    save_bot_session(current_session, "permanent_bot")
+    save_bot_session(current_session, f"bot_{me.id}")
+    save_bot_session(str(me.id), "active_bot_id")
     backup_db()
-    logger.info("Bot is running and listening for events...")
+    
+    logger.info(f"Bot @{me.username} ({me.id}) is running and listening for events...")
 
     # Start periodic background cleaner
     client.loop.create_task(periodic_temp_cleaner_task())
