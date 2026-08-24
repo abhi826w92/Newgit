@@ -19,7 +19,13 @@ API_HASH = os.getenv("API_HASH", "867fafeeabc20a75163ef2ddbd877f70").strip()
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://tgdriveapi.youganksaini1.workers.dev").rstrip("/")
 DEFAULT_API_KEY = os.getenv("DEFAULT_API_KEY", "").strip()
-DATABASE_PATH = str(BASE_DIR / os.getenv("DATABASE_PATH", "tgdrive_bot.db"))
+
+db_env = os.getenv("DATABASE_PATH", "tgdrive_bot.db").strip()
+if os.path.isabs(db_env):
+    DATABASE_PATH = db_env
+else:
+    DATABASE_PATH = str((BASE_DIR / db_env).resolve())
+
 TEMP_DIR = BASE_DIR / "temp_uploads"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 

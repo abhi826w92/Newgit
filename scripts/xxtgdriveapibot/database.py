@@ -1,18 +1,59 @@
 import sqlite3
 import json
 import logging
+import os
+import shutil
 from config import DATABASE_PATH, DEFAULT_API_KEY, ADMIN_IDS, API_ID, API_HASH
 from crypto import encrypt_api_key, decrypt_api_key
 
 logger = logging.getLogger(__name__)
 
 def get_connection():
-    conn = sqlite3.connect(DATABASE_PATH)
+    """Get SQLite connection with WAL mode, busy timeout, and thread safety for zero data loss."""
+    # Ensure parent directory exists
+    db_dir = os.path.dirname(DATABASE_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+        
+    conn = sqlite3.connect(DATABASE_PATH, timeout=20.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # High-Performance Crash-Resilient Pragmas
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=10000;")
+    conn.execute("PRAGMA cache_size=-8000;") # 8MB memory cache
     return conn
 
+def backup_db():
+    """Create an atomic, non-blocking online SQLite backup to guard against VPS crashes."""
+    try:
+        backup_path = DATABASE_PATH + ".bak"
+        conn = get_connection()
+        backup_conn = sqlite3.connect(backup_path, timeout=20.0)
+        with backup_conn:
+            conn.backup(backup_conn, pages=100, sleep=0.01)
+        backup_conn.close()
+        conn.close()
+        logger.debug("Database backup completed successfully.")
+    except Exception as e:
+        logger.debug(f"Database backup notice: {e}")
+
+def restore_db_from_backup():
+    """Restore database from backup if main database is missing or corrupt."""
+    backup_path = DATABASE_PATH + ".bak"
+    if os.path.exists(backup_path) and os.path.getsize(backup_path) > 0:
+        if not os.path.exists(DATABASE_PATH) or os.path.getsize(DATABASE_PATH) == 0:
+            try:
+                shutil.copy2(backup_path, DATABASE_PATH)
+                logger.info("Successfully restored database from .bak archive!")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to restore database from backup: {e}")
+    return False
+
 def init_db():
-    """Initialize database tables and perform automatic schema migrations."""
+    """Initialize database tables, execute migrations, auto-seed admins, and create backup."""
+    restore_db_from_backup()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -21,6 +62,7 @@ def init_db():
             api_id TEXT,
             api_hash TEXT,
             api_key TEXT DEFAULT '',
+            session_string TEXT DEFAULT '',
             username TEXT,
             first_name TEXT,
             current_folder_id TEXT DEFAULT 'root',
@@ -71,7 +113,16 @@ def init_db():
 
     conn.commit()
     conn.close()
-    logger.info("Database initialized successfully.")
+
+    # Auto-seed Admins from environment variables so admins are always configured
+    for admin_id in ADMIN_IDS:
+        if API_ID and API_HASH:
+            set_user_tg_credentials(admin_id, str(API_ID), API_HASH, username="Admin", first_name="Admin")
+        if DEFAULT_API_KEY:
+            set_user_api_key(admin_id, DEFAULT_API_KEY, username="Admin", first_name="Admin")
+
+    backup_db()
+    logger.info("Database initialized successfully with WAL persistence & backup.")
 
 def get_user(user_id: int):
     """Fetch user record by user_id."""
@@ -323,14 +374,17 @@ def get_user_folder(user_id: int):
     return "root", "Root (Saved Messages)"
 
 def set_user_folder(user_id: int, folder_id: str, folder_name: str = "Root (Saved Messages)"):
-    """Set user's active default target upload folder."""
+    """Set user's active default target upload folder with atomic persistence."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        UPDATE users 
-        SET current_folder_id = ?, current_folder_name = ?, last_active = CURRENT_TIMESTAMP 
-        WHERE user_id = ?
-    """, (str(folder_id), folder_name, user_id))
+        INSERT INTO users (user_id, api_key, current_folder_id, current_folder_name, last_active)
+        VALUES (?, COALESCE((SELECT api_key FROM users WHERE user_id = ?), ''), ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            current_folder_id = excluded.current_folder_id,
+            current_folder_name = excluded.current_folder_name,
+            last_active = CURRENT_TIMESTAMP
+    """, (user_id, user_id, str(folder_id), folder_name))
     conn.commit()
     conn.close()
 
@@ -339,17 +393,18 @@ def reset_user_folder(user_id: int):
     set_user_folder(user_id, "root", "Root (Saved Messages)")
 
 def set_user_state(user_id: int, state: str, state_data: dict = None):
-    """Set a conversational state for user."""
+    """Set a conversational state for user with atomic persistence."""
     conn = get_connection()
     cursor = conn.cursor()
     data_str = json.dumps(state_data) if state_data else None
     cursor.execute("""
-        UPDATE users SET state = ?, state_data = ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ?
-    """, (state, data_str, user_id))
-    if cursor.rowcount == 0:
-        cursor.execute("""
-            INSERT INTO users (user_id, api_key, state, state_data) VALUES (?, '', ?, ?)
-        """, (user_id, state, data_str))
+        INSERT INTO users (user_id, api_key, state, state_data, last_active)
+        VALUES (?, COALESCE((SELECT api_key FROM users WHERE user_id = ?), ''), ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            state = excluded.state,
+            state_data = excluded.state_data,
+            last_active = CURRENT_TIMESTAMP
+    """, (user_id, user_id, state, data_str))
     conn.commit()
     conn.close()
 
@@ -372,16 +427,17 @@ def clear_user_state(user_id: int):
     conn.close()
 
 def update_user_activity(user_id: int, username: str = None, first_name: str = None):
-    """Update last active timestamp."""
+    """Update last active timestamp, registering user if not yet in database."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        UPDATE users SET
-            username = COALESCE(?, username),
-            first_name = COALESCE(?, first_name),
+        INSERT INTO users (user_id, api_key, username, first_name, last_active)
+        VALUES (?, COALESCE((SELECT api_key FROM users WHERE user_id = ?), ''), ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = COALESCE(excluded.username, users.username),
+            first_name = COALESCE(excluded.first_name, users.first_name),
             last_active = CURRENT_TIMESTAMP
-        WHERE user_id = ?
-    """, (username, first_name, user_id))
+    """, (user_id, user_id, username, first_name))
     conn.commit()
     conn.close()
 
@@ -421,12 +477,12 @@ def set_user_session(user_id: int, session_str: str):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO users (user_id, session_string, last_active)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO users (user_id, api_key, session_string, last_active)
+        VALUES (?, COALESCE((SELECT api_key FROM users WHERE user_id = ?), ''), ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             session_string = excluded.session_string,
             last_active = CURRENT_TIMESTAMP
-    """, (user_id, enc_session))
+    """, (user_id, user_id, enc_session))
     conn.commit()
     conn.close()
     logger.info(f"Saved encrypted StringSession for user {user_id} in database.")

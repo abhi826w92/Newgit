@@ -36,6 +36,7 @@ from telethon.tl.types import Document, MessageMediaDocument, MessageMediaPhoto
 from config import BOT_TOKEN, BOT_SESSION_STRING, API_ID, API_HASH, ADMIN_IDS, TEMP_DIR, API_BASE_URL
 from database import (
     init_db,
+    backup_db,
     get_bot_session,
     save_bot_session,
     get_user_api_key,
@@ -1697,27 +1698,32 @@ def force_purge_temp_storage(max_age_seconds: int = 0) -> int:
     return cleaned
 
 async def periodic_temp_cleaner_task():
-    """Background task that runs every 10 minutes to auto-purge any stuck/orphaned download files."""
+    """Background task that runs every 10 minutes to auto-purge orphaned files and backup database."""
     while True:
         try:
             await asyncio.sleep(600)  # Check every 10 minutes
             force_purge_temp_storage(max_age_seconds=900)  # Purge files stuck > 15 mins
+            backup_db()  # Non-blocking SQLite atomic backup
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.warning(f"Periodic cleaner task exception: {e}")
+            logger.warning(f"Periodic cleaner/backup task exception: {e}")
             await asyncio.sleep(60)
 
 def register_cleanup_hooks():
-    """Register system shutdown and signal hooks to ensure zero disk leaks."""
+    """Register system shutdown and signal hooks to ensure zero disk leaks and complete DB flush."""
     import atexit
     import signal
 
-    atexit.register(lambda: force_purge_temp_storage(0))
+    def _on_shutdown():
+        force_purge_temp_storage(0)
+        backup_db()
+
+    atexit.register(_on_shutdown)
 
     def _signal_handler(signum, frame):
-        logger.info(f"Received termination signal ({signum}). Running emergency force purge...")
-        force_purge_temp_storage(0)
+        logger.info(f"Received termination signal ({signum}). Running emergency force purge & DB backup...")
+        _on_shutdown()
         os._exit(0)
 
     try:
@@ -1738,19 +1744,20 @@ def main():
 
     print("========================================")
     print("🚀 TG Drive MTProto Bot is Starting...")
-    print("🔥 Build Version: v3.4.0 [HYBRID ENV/DB ENCRYPTED SESSION ENGINE]")
+    print("🔥 Build Version: v3.5.0 [CRASH-PROOF PERSISTENCE & AUTO-RECOVERY DB ENGINE]")
     print(f"🤖 Bot Token: {BOT_TOKEN[:10]}...")
     print("⚡ 2GB+ File Upload Engine: ACTIVE (Telethon MTProto)")
     print("📊 Real-Time Visual Loading Progress: ACTIVE")
     print("⚡ Ultra-Fast Memory Cache: ACTIVE")
     print("🧹 Force Storage Cleaner & Crash Purge: ACTIVE")
-    print("🔒 Admin Session: .env / SQLite (Dual-Tier Permanent)")
-    print("🔒 User Sessions: AES-256 PBKDF2 Encrypted in SQLite DB")
+    print("💾 Database Engine: WAL Mode + Auto-Recovery Backup (.bak)")
+    print("🔒 Admin & User Sessions: Permanent AES-256 Encrypted")
     print("========================================")
     
     client.start(bot_token=BOT_TOKEN)
     # Persist session string in database
     save_bot_session(client.session.save(), "permanent_bot")
+    backup_db()
     logger.info("Bot is running and listening for events...")
 
     # Start periodic background cleaner
