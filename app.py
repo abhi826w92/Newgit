@@ -1192,11 +1192,14 @@ def get_main_menu_keyboard():
                 {"text": "📂 Workspace Files", "callback_data": "menu_files"}
             ],
             [
+                {"text": "🗄️ Databases & Storage", "callback_data": "menu_db_inspector"},
+                {"text": "💾 Cloud Sync", "callback_data": "menu_sync"}
+            ],
+            [
                 {"text": "📦 Install Pip", "callback_data": "menu_pip_prompt"},
                 {"text": "💻 Linux Shell", "callback_data": "menu_sh_prompt"}
             ],
             [
-                {"text": "💾 Cloud Sync", "callback_data": "menu_sync"},
                 {"text": "ℹ️ Server Info", "callback_data": "menu_server_info"}
             ]
         ]
@@ -2289,6 +2292,200 @@ def show_server_info_view(chat_id, message_id=None):
         ]
     }
     
+def format_bytes_human(size_in_bytes):
+    """Formats raw bytes into human readable KB, MB, GB."""
+    if size_in_bytes < 1024:
+        return f"{size_in_bytes} B"
+    elif size_in_bytes < 1024 * 1024:
+        return f"{size_in_bytes / 1024:.1f} KB"
+    elif size_in_bytes < 1024 * 1024 * 1024:
+        return f"{size_in_bytes / (1024 * 1024):.2f} MB"
+    else:
+        return f"{size_in_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+def get_sqlite_table_summary(db_path):
+    """Safely extracts table names and row counts from SQLite databases without locks."""
+    if not os.path.exists(db_path) or not db_path.endswith(('.db', '.sqlite', '.sqlite3', '.session')):
+        return ""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+        tables = [r[0] for r in cursor.fetchall()]
+        summaries = []
+        for t in tables[:3]:
+            try:
+                cursor.execute(f"SELECT count(*) FROM `{t}`;")
+                count = cursor.fetchone()[0]
+                summaries.append(f"{t}: {count}")
+            except Exception:
+                summaries.append(t)
+        conn.close()
+        if summaries:
+            return " <i>(" + ", ".join(summaries) + ")</i>"
+    except Exception:
+        pass
+    return ""
+
+def scan_all_database_and_storage_items():
+    """Recursively scans scripts/ and root WORKSPACE_DIR for all database files, sessions, vaults, and storage assets."""
+    storage_items = []
+    db_exts = {".db", ".sqlite", ".sqlite3", ".db-journal", ".db-wal", ".db-shm"}
+    session_exts = {".session", ".session-journal", ".session-shm", ".session-wal"}
+    
+    # 1. Scan scripts/
+    if os.path.exists(SCRIPTS_DIR):
+        for root, _, files in os.walk(SCRIPTS_DIR):
+            for f in files:
+                f_lower = f.lower()
+                fp = os.path.join(root, f)
+                rel = os.path.relpath(fp, WORKSPACE_DIR).replace("\\", "/")
+                ext = os.path.splitext(f_lower)[1]
+                
+                cat = None
+                if ext in db_exts:
+                    cat = "DATABASE"
+                elif ext in session_exts:
+                    cat = "SESSION"
+                elif f_lower.endswith(".env") or f_lower == ".env":
+                    cat = "ENV_SECRET"
+                elif f_lower.endswith(".log") or (f_lower.startswith("logs_") and f_lower.endswith(".md")):
+                    cat = "LOG"
+                elif f_lower.startswith(".staging_") or f_lower.startswith("temp_"):
+                    cat = "TEMP_STAGING"
+                    
+                if cat:
+                    try:
+                        sz = os.path.getsize(fp)
+                        mtime = os.path.getmtime(fp)
+                        storage_items.append({
+                            "name": f,
+                            "path": fp,
+                            "rel_path": rel,
+                            "size": sz,
+                            "human_size": format_bytes_human(sz),
+                            "category": cat,
+                            "mtime": mtime
+                        })
+                    except Exception:
+                        pass
+
+    # 2. Scan root WORKSPACE_DIR (excluding .git and .venvs)
+    if os.path.exists(WORKSPACE_DIR):
+        for f in os.listdir(WORKSPACE_DIR):
+            if f.startswith(".git") or f == ".venvs" or f == "scripts":
+                continue
+            fp = os.path.join(WORKSPACE_DIR, f)
+            if os.path.isfile(fp):
+                f_lower = f.lower()
+                rel = f
+                ext = os.path.splitext(f_lower)[1]
+                cat = None
+                if ext in db_exts:
+                    cat = "DATABASE"
+                elif ext in session_exts:
+                    cat = "SESSION"
+                elif f_lower in [".env_vault.json", ".env"] or f_lower.endswith(".env"):
+                    cat = "ENV_SECRET"
+                elif f_lower.endswith(".log") or (f_lower.startswith("logs_") and f_lower.endswith(".md")):
+                    cat = "LOG"
+                elif f_lower.startswith(".staging_") or f_lower.startswith("temp_"):
+                    cat = "TEMP_STAGING"
+                
+                if cat:
+                    try:
+                        sz = os.path.getsize(fp)
+                        mtime = os.path.getmtime(fp)
+                        storage_items.append({
+                            "name": f,
+                            "path": fp,
+                            "rel_path": rel,
+                            "size": sz,
+                            "human_size": format_bytes_human(sz),
+                            "category": cat,
+                            "mtime": mtime
+                        })
+                    except Exception:
+                        pass
+
+    storage_items.sort(key=lambda x: x["size"], reverse=True)
+    return storage_items
+
+def show_database_inspector_view(chat_id, message_id=None):
+    storage_items = scan_all_database_and_storage_items()
+    total_bytes = sum(x["size"] for x in storage_items)
+    
+    db_items = [x for x in storage_items if x["category"] == "DATABASE"]
+    session_items = [x for x in storage_items if x["category"] == "SESSION"]
+    env_items = [x for x in storage_items if x["category"] == "ENV_SECRET"]
+    temp_items = [x for x in storage_items if x["category"] in ["LOG", "TEMP_STAGING"]]
+    
+    total_human = format_bytes_human(total_bytes)
+    
+    lines = [
+        "🗄️ <b>Database & Storage Inspector</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📦 <b>Total Storage Footprint:</b> <code>{total_human}</code> ({len(storage_items)} items)",
+        f"📊 <b>Telemetry:</b> 🗄️ {len(db_items)} DBs | 🔑 {len(session_items)} Sessions | 🔒 {len(env_items)} Secrets | 📄 {len(temp_items)} Temp/Logs\n"
+    ]
+    
+    if not storage_items:
+        lines.append("<i>✨ All databases, sessions, and storage files are 100% clean and empty!</i>")
+    else:
+        if db_items:
+            lines.append("🗄️ <b>Database Files (.db / .sqlite):</b>")
+            for item in db_items[:10]:
+                table_info = get_sqlite_table_summary(item["path"])
+                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>){table_info}")
+            lines.append("")
+            
+        if session_items:
+            lines.append("🔑 <b>Telegram Sessions (.session):</b>")
+            for item in session_items[:10]:
+                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>)")
+            lines.append("")
+            
+        if env_items:
+            lines.append("🔒 <b>Environments & Vaults (.env / .json):</b>")
+            for item in env_items[:6]:
+                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>)")
+            lines.append("")
+            
+        if temp_items:
+            lines.append("📄 <b>Temporary Staging & Logs:</b>")
+            for item in temp_items[:6]:
+                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>)")
+            lines.append("")
+
+    lines.append("<i>Tap an item below to Download or Delete, or use bulk wipe buttons:</i>")
+    text = "\n".join(lines)
+    
+    buttons = []
+    for item in storage_items[:15]:
+        rel = item["rel_path"]
+        name_trunc = item["name"] if len(item["name"]) <= 20 else item["name"][:17] + "..."
+        btn_dl = {"text": f"📥 {name_trunc} ({item['human_size']})", "callback_data": f"db_dl_{rel}"}
+        btn_del = {"text": "🗑️ Delete", "callback_data": f"db_del_one_{rel}"}
+        buttons.append([btn_dl, btn_del])
+        
+    bulk_row = []
+    if db_items:
+        bulk_row.append({"text": "🗄️ Wipe All DBs", "callback_data": "db_wipe_all_dbs_prompt"})
+    if session_items:
+        bulk_row.append({"text": "🔑 Wipe All Sessions", "callback_data": "db_wipe_all_sessions_prompt"})
+    if bulk_row:
+        buttons.append(bulk_row)
+        
+    if storage_items:
+        buttons.append([{"text": "💣 NUKE & WIPE ALL DATABASES & STORAGE", "callback_data": "db_nuke_all_prompt"}])
+        
+    buttons.append([
+        {"text": "🔄 Rescan / Refresh", "callback_data": "menu_db_inspector"},
+        {"text": "🔙 Main Menu", "callback_data": "menu_main"}
+    ])
+    
+    markup = {"inline_keyboard": buttons[:85]}
     if message_id:
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
     else:
@@ -2481,6 +2678,214 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             ]
         }
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 2i. Database & Storage Inspector Menu
+    elif data == "menu_db_inspector":
+        answer_callback(callback_id, "Scanning databases & storage...")
+        show_database_inspector_view(chat_id, message_id)
+
+    # 2j. Download specific DB / Session / Storage file
+    elif data.startswith("db_dl_"):
+        rel_target = data.replace("db_dl_", "")
+        full_target = os.path.join(WORKSPACE_DIR, rel_target)
+        if os.path.exists(full_target):
+            answer_callback(callback_id, f"Sending {os.path.basename(rel_target)}...")
+            send_tg_document(chat_id, full_target, caption=f"🗄️ <b>Storage File:</b> <code>{rel_target}</code> ({format_bytes_human(os.path.getsize(full_target))})")
+        else:
+            answer_callback(callback_id, "File not found or already deleted!", show_alert=True)
+
+    # 2k. Delete single specific DB / Session / Storage file
+    elif data.startswith("db_del_one_"):
+        rel_target = data.replace("db_del_one_", "")
+        full_target = os.path.join(WORKSPACE_DIR, rel_target)
+        fname = os.path.basename(rel_target)
+        
+        answer_callback(callback_id, f"Deleting {fname}...")
+        
+        # 1. Delete from disk
+        if os.path.exists(full_target):
+            try:
+                if os.path.isdir(full_target):
+                    shutil.rmtree(full_target, ignore_errors=True)
+                else:
+                    os.remove(full_target)
+            except Exception as e_del:
+                logger.error(f"Error removing {full_target}: {e_del}")
+                
+        # 2. Delete journal/wal/shm companion files if any
+        stem = os.path.splitext(full_target)[0]
+        for extra_ext in [".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"]:
+            c_path = stem + extra_ext
+            if os.path.exists(c_path):
+                try:
+                    os.remove(c_path)
+                except Exception:
+                    pass
+                    
+        # 3. Explicitly remove from Git index
+        try:
+            subprocess.run(["git", "rm", "-f", "--ignore-unmatch", rel_target, f"{rel_target}*"], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+            
+        # 4. Sync deletion to GitHub
+        threading.Thread(target=git_sync_to_github, args=(f"Permanently delete storage file {rel_target}",), daemon=True).start()
+        
+        answer_callback(callback_id, f"🗑️ {fname} permanently deleted!", show_alert=True)
+        show_database_inspector_view(chat_id, message_id)
+
+    # 2l. Wipe All Databases Prompt
+    elif data == "db_wipe_all_dbs_prompt":
+        answer_callback(callback_id)
+        text = (
+            "🗄️ <b>Confirm Wipe All Database Files</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <b>WARNING:</b> This will permanently delete <b>ALL SQLite database files (.db, .sqlite, .sqlite3)</b> across all scripts and workspace!\n\n"
+            "Are you sure you want to proceed?"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "💣 Yes, Delete All Databases", "callback_data": "do_db_wipe_all_dbs"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_db_inspector"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 2m. Execute Wipe All Databases
+    elif data == "do_db_wipe_all_dbs":
+        answer_callback(callback_id, "Deleting all databases...")
+        db_exts = {".db", ".sqlite", ".sqlite3", ".db-journal", ".db-wal", ".db-shm"}
+        deleted_count = 0
+        
+        for root, _, files in os.walk(WORKSPACE_DIR):
+            if ".git" in root:
+                continue
+            for f in files:
+                ext = os.path.splitext(f.lower())[1]
+                if ext in db_exts:
+                    fp = os.path.join(root, f)
+                    try:
+                        os.remove(fp)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+                        
+        try:
+            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", "*.db", "*.sqlite*", "scripts/*.db", "scripts/*/*.db"], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+            
+        threading.Thread(target=git_sync_to_github, args=("Wipe all SQLite database files via Telegram",), daemon=True).start()
+        answer_callback(callback_id, f"✅ Deleted {deleted_count} database files!", show_alert=True)
+        show_database_inspector_view(chat_id, message_id)
+
+    # 2n. Wipe All Sessions Prompt
+    elif data == "db_wipe_all_sessions_prompt":
+        answer_callback(callback_id)
+        text = (
+            "🔑 <b>Confirm Wipe All Telegram Sessions</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <b>WARNING:</b> This will permanently delete <b>ALL Telethon & Pyrogram session files (.session)</b> across all scripts!\n\n"
+            "Are you sure you want to proceed?"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "💣 Yes, Delete All Sessions", "callback_data": "do_db_wipe_all_sessions"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_db_inspector"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 2o. Execute Wipe All Sessions
+    elif data == "do_db_wipe_all_sessions":
+        answer_callback(callback_id, "Deleting all session files...")
+        session_exts = {".session", ".session-journal", ".session-shm", ".session-wal"}
+        deleted_count = 0
+        
+        for root, _, files in os.walk(WORKSPACE_DIR):
+            if ".git" in root:
+                continue
+            for f in files:
+                ext = os.path.splitext(f.lower())[1]
+                if ext in session_exts:
+                    fp = os.path.join(root, f)
+                    try:
+                        os.remove(fp)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+                        
+        try:
+            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", "*.session*", "scripts/*.session*", "scripts/*/*.session*"], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+            
+        threading.Thread(target=git_sync_to_github, args=("Wipe all Telegram session files via Telegram",), daemon=True).start()
+        answer_callback(callback_id, f"✅ Deleted {deleted_count} session files!", show_alert=True)
+        show_database_inspector_view(chat_id, message_id)
+
+    # 2p. Nuke All Databases & Storage Prompt
+    elif data == "db_nuke_all_prompt":
+        answer_callback(callback_id)
+        text = (
+            "💣 <b>CONFIRM COMPLETE STORAGE NUKE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <b>DANGER:</b> This will permanently wipe <b>ALL databases (.db), sessions (.session), temporary files, logs, and vaults</b> in your entire repository!\n\n"
+            "Are you 100% sure you want to delete everything?"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "💥 YES, NUKE ALL STORAGE DATA", "callback_data": "do_db_nuke_all"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_db_inspector"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 2q. Execute Nuke All Storage
+    elif data == "do_db_nuke_all":
+        answer_callback(callback_id, "Nuking all databases, sessions, and storage...")
+        
+        # 1. Stop all scripts
+        stop_child_app(script_name=None, clear_active=True)
+        time.sleep(0.5)
+        
+        # 2. Delete all database, session, staging, temp, log files
+        wiped_exts = {".db", ".sqlite", ".sqlite3", ".db-journal", ".db-wal", ".db-shm", ".session", ".session-journal", ".session-shm", ".session-wal", ".log"}
+        deleted_count = 0
+        
+        for root, _, files in os.walk(WORKSPACE_DIR):
+            if ".git" in root:
+                continue
+            for f in files:
+                f_lower = f.lower()
+                ext = os.path.splitext(f_lower)[1]
+                if ext in wiped_exts or f_lower.startswith(".staging_") or f_lower.startswith("temp_") or f_lower.endswith(".env") or f_lower == ".env":
+                    fp = os.path.join(root, f)
+                    try:
+                        os.remove(fp)
+                        deleted_count += 1
+                    except Exception:
+                        pass
+                        
+        # 3. Clear vaults
+        config["env_vault"] = {}
+        save_config(config)
+        vault_file = get_env_vault_file()
+        try:
+            with open(vault_file, "w") as f:
+                json.dump({}, f)
+        except Exception:
+            pass
+            
+        # 4. Remove all from Git
+        try:
+            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", "*.db", "*.sqlite*", "*.session*", "scripts/*.db", "scripts/*.session*"], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+            
+        threading.Thread(target=git_sync_to_github, args=("Nuke all databases, sessions, and storage via Telegram",), daemon=True).start()
+        answer_callback(callback_id, f"💥 Storage Nuked! ({deleted_count} files removed)", show_alert=True)
+        show_database_inspector_view(chat_id, message_id)
 
     # 3. Runner Menu
     elif data in ["menu_runner", "menu_run_select"]:
@@ -3114,7 +3519,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             except Exception:
                 pass
 
-        # 5. Clean up disk completely (including the entire project folder if applicable)
+        # 5. Clean up disk completely (including the entire project folder, databases, sessions, journals)
         import shutil
         disk_paths_to_remove = [
             os.path.join(SCRIPTS_DIR, clean_fname),
@@ -3127,10 +3532,20 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             os.path.join(SCRIPTS_DIR, f"{clean_fname}.requirements.txt"),
             os.path.join(SCRIPTS_DIR, f"{base_stem}.session"),
             os.path.join(SCRIPTS_DIR, f"{base_stem}.session-journal"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.session-shm"),
+            os.path.join(SCRIPTS_DIR, f"{base_stem}.session-wal"),
             os.path.join(SCRIPTS_DIR, f"{base_stem}.db"),
             os.path.join(SCRIPTS_DIR, f"{base_stem}.db-journal"),
             os.path.join(SCRIPTS_DIR, f"{base_stem}.db-wal"),
             os.path.join(SCRIPTS_DIR, f"{base_stem}.db-shm"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.session"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.session-journal"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.session-shm"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.session-wal"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.db"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.db-journal"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.db-wal"),
+            os.path.join(WORKSPACE_DIR, f"{base_stem}.db-shm"),
         ]
         
         if project_folder_name:
@@ -3149,21 +3564,32 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 except Exception as e_del:
                     logger.error(f"Error removing {dp}: {e_del}")
 
-        # 6. Clean staging and temp files matching this script/project
-        try:
-            for it in os.listdir(WORKSPACE_DIR):
-                if it.startswith(".staging_") or it.startswith("temp_") or it.startswith("logs_"):
-                    if clean_fname in it or base_stem in it or (project_folder_name and project_folder_name in it):
+        # 6. Recursively find and delete all residual databases, sessions, staging, and logs matching this script or project
+        search_keys = [clean_fname.lower(), base_stem.lower()]
+        if project_folder_name:
+            search_keys.append(project_folder_name.lower())
+            
+        db_and_session_exts = {".db", ".sqlite", ".sqlite3", ".session", ".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"}
+        
+        for search_root in [SCRIPTS_DIR, WORKSPACE_DIR]:
+            if not os.path.exists(search_root):
+                continue
+            for root, dirs, files in os.walk(search_root):
+                if ".git" in root:
+                    continue
+                for f in files:
+                    f_lower = f.lower()
+                    ext = os.path.splitext(f_lower)[1]
+                    matches_key = any(k in f_lower for k in search_keys if len(k) >= 3)
+                    
+                    if matches_key and (ext in db_and_session_exts or f_lower.startswith(".staging_") or f_lower.startswith("temp_") or f_lower.startswith("logs_")):
+                        target_file = os.path.join(root, f)
                         try:
-                            p = os.path.join(WORKSPACE_DIR, it)
-                            if os.path.isdir(p):
-                                shutil.rmtree(p, ignore_errors=True)
-                            else:
-                                os.remove(p)
+                            os.remove(target_file)
+                            rel_target = os.path.relpath(target_file, WORKSPACE_DIR).replace("\\", "/")
+                            subprocess.run(["git", "rm", "-f", "--ignore-unmatch", rel_target], cwd=WORKSPACE_DIR, capture_output=True)
                         except Exception:
                             pass
-        except Exception:
-            pass
 
         # 7. Clean up isolated virtualenvs
         venv_slugs = [
