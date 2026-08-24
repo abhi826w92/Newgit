@@ -4,9 +4,9 @@
     7251749429
   ],
   "active_scripts": [
-    "Ghidrabot vps/bot.py",
     "tgdriveapi-python (3)/app.py",
-    "xxtgdriveapibot/main.py"
+    "xxtgdriveapibot/main.py",
+    "Ghidrabot vps/bot.py"
   ],
   "auto_run_file": null,
   "env_vault": {
