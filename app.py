@@ -4132,25 +4132,23 @@ def main():
     # Seamless Multi-Script Relay Persistence: Auto-resume active scripts
     active_list = config.get("active_scripts")
     
-    # If active_scripts was never initialized in config (first boot), look for candidates
-    if active_list is None:
+    # If active_scripts is empty or uninitialized, auto-detect runnable projects & scripts in scripts/
+    if not active_list:
         active_list = []
         if config.get("active_script"):
             active_list = [config["active_script"]]
         else:
-            vault_scripts = list(config.get("env_vault", {}).keys())
-            for s in vault_scripts:
-                sp = os.path.join(SCRIPTS_DIR, s)
-                if os.path.exists(sp) and s not in active_list:
-                    active_list.append(s)
-            if not active_list:
-                for root, _, fs in os.walk(SCRIPTS_DIR):
-                    for f in fs:
-                        if f.endswith(".py") and not f.startswith("."):
-                            rel = os.path.relpath(os.path.join(root, f), SCRIPTS_DIR)
-                            if is_runnable_entry_point(rel) and rel not in active_list:
-                                active_list.append(rel)
-                                break
+            for it in sorted(os.listdir(SCRIPTS_DIR)):
+                if it.startswith(".") or it == "__pycache__":
+                    continue
+                p = os.path.join(SCRIPTS_DIR, it)
+                if os.path.isdir(p):
+                    entry = detect_project_entry_script(p)
+                    if entry and entry not in active_list:
+                        active_list.append(entry)
+                elif it.endswith(".py"):
+                    if is_runnable_entry_point(it) and it not in active_list:
+                        active_list.append(it)
 
     if active_list:
         logger.info(f"🔄 Auto-resuming {len(active_list)} active scripts across relay handoff/boot: {active_list}")
