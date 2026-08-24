@@ -3,10 +3,7 @@
     7249511572,
     7251749429
   ],
-  "active_scripts": [
-    "tgdriveapi-python (3)/app.py",
-    "xxtgdriveapibot/main.py"
-  ],
+  "active_scripts": [],
   "auto_run_file": null,
   "env_vault": {
     "xxtgdriveapibot/main.py": "8itYzU4QyMr23YvcJW1f0ZW8UWQR979FaHcaFE45WGon7OK5bC/tKyPzfhksaNFsJFctO65iXbwm528iTZy2BkXzEwMLICOqSl7/cdUYD4ZFFNBZ/0M6V7ZqCdRVi4vwd4kFNCp6oi5MLGgW/giyLC9eU+54Z0x0xC6yCm4YXf6ybFSBihvHwHl1wvYEus0F/DPi/v4ZeipWHTl4hKqgFdOX94aYI6Zk0V2kUiptmsVsl6a8A/bv/c2ZREV+k/vB6I+suo52ZO2X16ZGuGsyAJtkbk6tPJoGlSsVaf8AY0rnDlmI2hKryldM/8pXney/MKgnnsY2QleiYLW9EmDCfNsYPhsNCDfhFG5lRV1Wft+xv7z7qm/r54n4XAEwuA+Sj1aYVtonzBAFUDIWOssIFjlxl6GJIKqBj6dB4WQhk3qfSB8Gc3GUppAmr7SAixkIzcNjjD9U3iI5PlE69EgcqikJ5IRAMsHeybiYqkwdnRxFtB04SrIwcEPuq76X+iu3mv08qjarUxOvCqJEVuIcGFmzOzCmz7Z2UoXndJOcazOzlxx2O4q9AuAoNs9Gi5SKN6IDG+/fCSGu1YCE5PyS+xu0pwxRHSOqPJItsemxeRGX",
