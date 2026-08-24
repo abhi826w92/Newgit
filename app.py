@@ -1851,24 +1851,33 @@ def prompt_env_delete_list(chat_id, user_id, py_filename, message_id=None):
 # ---------------------------------------------------------------------------
 def prompt_runner_menu(chat_id, user_id, message_id=None):
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
+    active = get_active_running_processes()
     
-    # Scan all Python files recursively
+    # 1. Scan all Python files recursively across scripts/ and projects
     all_files = []
     for root, _, fs in os.walk(SCRIPTS_DIR):
         for f in fs:
-            if f.endswith(".py") and not f.startswith("."):
-                rel = os.path.relpath(os.path.join(root, f), SCRIPTS_DIR)
+            if f.endswith(".py") and not f.startswith(".") and f != "__init__.py":
+                rel = os.path.relpath(os.path.join(root, f), SCRIPTS_DIR).replace("\\", "/")
                 all_files.append(rel)
-    all_files.sort()
-    
-    runnable_files = [f for f in all_files if is_runnable_entry_point(f)]
-    if not runnable_files and all_files:
-        runnable_files = all_files # Fallback if only 1 non-standard file exists
-    
-    active = get_active_running_processes()
+                
+    # Also include any active scripts tracked in running_processes
+    for k in active.keys():
+        clean_k = k.replace("scripts/", "").lstrip("/").replace("\\", "/")
+        if clean_k not in all_files and not clean_k.startswith("."):
+            all_files.append(clean_k)
+            
+    # Sort: running scripts first, then entry points (bot.py, main.py, app.py), then others
+    def sort_script_key(s):
+        is_run = s in active or os.path.basename(s) in active or any(k.endswith(s) or s.endswith(k) for k in active.keys())
+        base = os.path.basename(s).lower()
+        is_priority = base in ["bot.py", "main.py", "app.py", "run.py", "start.py", "server.py"]
+        return (0 if is_run else (1 if is_priority else 2), s)
+        
+    all_files.sort(key=sort_script_key)
     
     buttons = []
-    if not runnable_files:
+    if not all_files:
         text = (
             "🚀 <b>Scripts Runner Manager (Multi-Process)</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1879,12 +1888,15 @@ def prompt_runner_menu(chat_id, user_id, message_id=None):
         text = (
             "🚀 <b>Scripts Runner Manager (Multi-Process)</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• <b>Active Scripts:</b> {len(active)} Running Concurrently\n"
-            f"• <b>Total Scripts Available:</b> {len(runnable_files)}\n\n"
-            "<i>Tap <b>▶️ Run</b> to launch in parallel or <b>🛑 Stop</b> to terminate:</i>"
+            f"• <b>Active Running Scripts:</b> 🟢 <b>{len(active)} Running</b>\n"
+            f"• <b>Total Scripts Available:</b> <b>{len(all_files)}</b>\n\n"
+            "<i>Tap <b>▶️ Run</b> to launch concurrently or <b>🛑 Stop</b> to terminate:</i>"
         )
-        for py in runnable_files:
-            is_this_running = py in active
+        for py in all_files:
+            # Check if this script is active/running
+            is_this_running = py in active or os.path.basename(py) in active or any(k.endswith(py) or py.endswith(k) for k in active.keys())
+            running_key = next((k for k in active.keys() if k == py or k == os.path.basename(py) or k.endswith(py) or py.endswith(k)), py) if is_this_running else py
+            
             req_p = get_script_req_path(py)
             has_env = len(read_script_env(py)) > 0
             
@@ -1896,11 +1908,12 @@ def prompt_runner_menu(chat_id, user_id, message_id=None):
             badge_str = f" {' '.join(badges)}" if badges else ""
             
             if is_this_running:
-                pdata = active[py]
-                cu_sec = int(time.time() - pdata["start_time"])
+                pdata = active.get(running_key, {})
+                st = pdata.get("start_time", time.time())
+                cu_sec = int(time.time() - st)
                 ch, cr = divmod(cu_sec, 3600)
                 cm, _ = divmod(cr, 60)
-                run_btn = {"text": f"🛑 Stop {py} ({ch}h {cm}m){badge_str}", "callback_data": f"confirm_stop_prompt_{py}"}
+                run_btn = {"text": f"🛑 Stop {py} ({ch}h {cm}m){badge_str}", "callback_data": f"confirm_stop_prompt_{running_key}"}
             else:
                 run_btn = {"text": f"▶️ Run {py}{badge_str}", "callback_data": f"exec_run_{py}"}
             
@@ -1912,7 +1925,7 @@ def prompt_runner_menu(chat_id, user_id, message_id=None):
         buttons.append([{"text": "🛑 Stop ALL Running Scripts", "callback_data": "menu_stop_all"}])
     buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
 
-    markup = {"inline_keyboard": buttons}
+    markup = {"inline_keyboard": buttons[:85]}
     if message_id:
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
     else:
@@ -2097,38 +2110,64 @@ def show_files_view(chat_id, message_id=None):
     file_lines = []
     download_buttons = []
     
+    # 1. Prominently display all Active Running Scripts at the top
+    if active:
+        file_lines.append("🟢 <b>Currently Active Running Processes:</b>")
+        for sname, pdata in sorted(active.items()):
+            st = pdata.get("start_time", time.time())
+            cu_sec = int(time.time() - st)
+            ch, cr = divmod(cu_sec, 3600)
+            cm, cs = divmod(cr, 60)
+            pid = pdata.get("pid", "N/A")
+            file_lines.append(f"• 🟢 <code>{sname}</code> (PID: <code>{pid}</code> | Uptime: <code>{ch}h {cm}m {cs}s</code>)")
+        file_lines.append("")
+        
     if not top_items:
-        file_lines.append("<i>Scripts folder (scripts/) is currently empty.\nSend any .py script, .env, or .zip archive to upload!</i>")
+        file_lines.append("<i>📁 Scripts folder (scripts/) is currently empty.\nSend any .py script or .zip project archive to upload!</i>")
     else:
+        file_lines.append("📁 <b>Workspace Projects & Scripts:</b>")
         for it in top_items:
             p = os.path.join(SCRIPTS_DIR, it)
             if os.path.isdir(p):
                 # It's a Project Archive / Directory!
                 inner_files = []
+                inner_py_files = []
                 total_size = 0
                 for root, _, fs in os.walk(p):
                     for f in fs:
                         if not f.startswith(".") and f != "__pycache__":
                             fp = os.path.join(root, f)
-                            total_size += os.path.getsize(fp)
-                            inner_files.append(os.path.relpath(fp, SCRIPTS_DIR))
+                            sz = os.path.getsize(fp)
+                            total_size += sz
+                            rel = os.path.relpath(fp, SCRIPTS_DIR).replace("\\", "/")
+                            inner_files.append((rel, f, sz))
+                            if f.endswith(".py"):
+                                inner_py_files.append((rel, f, sz))
                 
-                # Check if process is running inside this project
-                is_this_running = any(k.startswith(f"{it}/") or k == it for k in active.keys())
-                running_script_name = next((k for k in active.keys() if k.startswith(f"{it}/") or k == it), None)
+                # Check if running
+                is_this_running = any(k.startswith(f"{it}/") or k == it or os.path.dirname(k) == it for k in active.keys())
+                running_script_name = next((k for k in active.keys() if k.startswith(f"{it}/") or k == it or os.path.dirname(k) == it), None)
                 status_icon = "🟢" if is_this_running else "📦"
                 
-                # Detect entry script for Run button
                 entry_script = detect_project_entry_script(p)
-                            
-                badge_str = f" <i>(📁 {len(inner_files)} files | {total_size} bytes)</i>"
-                file_lines.append(f"• {status_icon} <b>{it}/</b> [Project Archive]{badge_str}{' <b>[RUNNING]</b>' if is_this_running else ''}")
+                entry_base = os.path.basename(entry_script) if entry_script else ""
                 
-                row_btns = [{"text": f"📥 {it}.zip", "callback_data": f"file_dl_{it}"}]
+                human_sz = format_bytes_human(total_size)
+                file_lines.append(f"• {status_icon} <b>{it}/</b> (<code>{len(inner_files)} files</code> | <code>{human_sz}</code>){' <b>[RUNNING]</b>' if is_this_running else ''}")
+                
+                # Show inner python scripts inside this project
+                for rel_py, py_name, py_sz in inner_py_files[:4]:
+                    py_is_run = rel_py in active or py_name in active or (running_script_name and running_script_name == rel_py)
+                    py_icon = "🟢" if py_is_run else "📄"
+                    file_lines.append(f"   └ {py_icon} <code>{rel_py}</code> ({format_bytes_human(py_sz)})")
+                if len(inner_py_files) > 4:
+                    file_lines.append(f"   └ <i>...and {len(inner_py_files) - 4} more files</i>")
+                    
+                # Action buttons for this project
+                row_btns = [{"text": f"📦 {it}.zip", "callback_data": f"file_dl_{it}"}]
                 if is_this_running and running_script_name:
-                    row_btns.append({"text": "🛑 Stop", "callback_data": f"confirm_stop_prompt_{running_script_name}"})
+                    row_btns.append({"text": f"🛑 Stop {entry_base or it}", "callback_data": f"confirm_stop_prompt_{running_script_name}"})
                 elif entry_script:
-                    entry_base = os.path.basename(entry_script)
                     row_btns.append({"text": f"▶️ Run {entry_base}", "callback_data": f"exec_run_{entry_script}"})
                 row_btns.append({"text": "🗑️ Delete", "callback_data": f"file_del_{it}"})
                 download_buttons.append(row_btns)
@@ -2137,52 +2176,51 @@ def show_files_view(chat_id, message_id=None):
                 sz = os.path.getsize(p)
                 is_this_running = it in active
                 status_icon = "🟢" if is_this_running else "📄"
+                human_sz = format_bytes_human(sz)
                 
                 if it.endswith(".py"):
-                    is_runnable = is_runnable_entry_point(it)
                     req_p = get_script_req_path(it)
                     has_env = len(read_script_env(it)) > 0
                     badges = []
                     if req_p:
-                        badges.append(f"📦 {os.path.basename(req_p)}")
-                    else:
-                        badges.append("📄 Standalone")
+                        badges.append("📦 Req")
                     if has_env:
-                        badges.append(f"🔒 {os.path.basename(it).rsplit('.', 1)[0]}.env")
+                        badges.append("🔒 Env")
+                    badge_str = f" <i>({' | '.join(badges)})</i>" if badges else ""
                     
-                    badge_str = f" <i>({' | '.join(badges)})</i>"
-                    file_lines.append(f"• {status_icon} <code>{it}</code> ({sz} bytes){badge_str}{' <b>[RUNNING]</b>' if is_this_running else ''}")
+                    file_lines.append(f"• {status_icon} <code>{it}</code> ({human_sz}){badge_str}{' <b>[RUNNING]</b>' if is_this_running else ''}")
                     
                     row_btns = [{"text": f"📥 {it}", "callback_data": f"file_dl_{it}"}]
                     if is_this_running:
                         row_btns.append({"text": "🛑 Stop", "callback_data": f"confirm_stop_prompt_{it}"})
-                    elif is_runnable:
+                    else:
                         row_btns.append({"text": "▶️ Run", "callback_data": f"exec_run_{it}"})
                     row_btns.append({"text": "🗑️ Delete", "callback_data": f"file_del_{it}"})
                     download_buttons.append(row_btns)
                 else:
-                    file_lines.append(f"• 📄 <code>{it}</code> ({sz} bytes)")
+                    file_lines.append(f"• 📄 <code>{it}</code> ({human_sz})")
                     download_buttons.append([
                         {"text": f"📥 {it}", "callback_data": f"file_dl_{it}"},
                         {"text": "🗑️ Delete", "callback_data": f"file_del_{it}"}
                     ])
-    
+                    
     text = (
-        "📂 <b>Scripts File Manager</b>\n"
+        "📂 <b>Workspace & Scripts File Manager</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📁 <b>Directory:</b> <code>scripts/</code> (Cloud Storage)\n"
-        f"📊 <b>Total Items:</b> {len(top_items)}\n"
-        f"🟢 <b>Active Running:</b> {len(active)}\n\n"
-        + "\n".join(file_lines[:40])
-        + ("\n<i>...and more items</i>" if len(file_lines) > 40 else "")
+        f"📊 <b>Total Projects & Files:</b> <b>{len(top_items)}</b>\n"
+        f"🟢 <b>Active Processes:</b> <b>{len(active)} Running</b>\n\n"
+        + "\n".join(file_lines[:45])
+        + ("\n<i>...and more items</i>" if len(file_lines) > 45 else "")
         + "\n\n<i>Tap a button below to Download, Run, or Delete:</i>"
     )
+    
     download_buttons.append([{"text": "📤 Upload New Script / ZIP", "callback_data": "menu_upload_prompt"}])
     download_buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}])
     if top_items:
         download_buttons.append([{"text": "💣 Delete All Scripts & Projects", "callback_data": "wipe_all_workspace_prompt"}])
     download_buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
-    markup = {"inline_keyboard": download_buttons[:90]} # Keep under TG inline keyboard limit
+    markup = {"inline_keyboard": download_buttons[:85]}
     
     if message_id:
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
