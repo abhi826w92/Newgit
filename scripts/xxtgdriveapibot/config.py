@@ -12,7 +12,7 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8486999738:AAEXkcxrILtF2AH2YfPesT1vwUAhPKiRVYs").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8850296749:AAFsjQ58Te0NqlQv6mCIw0C2V90AtQKdeU0").strip()
 BOT_SESSION_STRING = os.getenv("BOT_SESSION_STRING", "").strip()
 API_ID = int(os.getenv("API_ID", "29116029"))
 API_HASH = os.getenv("API_HASH", "867fafeeabc20a75163ef2ddbd877f70").strip()
