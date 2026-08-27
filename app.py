@@ -25,14 +25,24 @@ logger = logging.getLogger("TGBotController")
 # ---------------------------------------------------------------------------
 # Configuration & Environment Variables
 # ---------------------------------------------------------------------------
+def sanitize_github_token(token):
+    if not token:
+        return ""
+    t = str(token).strip().strip("'\"")
+    if t.startswith("Bearer "):
+        t = t[7:].strip()
+    elif t.startswith("token "):
+        t = t[6:].strip()
+    return t
+
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
-GH_PAT = os.environ.get("GH_PAT", "").strip()
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GH_PAT = sanitize_github_token(os.environ.get("GH_PAT", ""))
+GITHUB_TOKEN = sanitize_github_token(os.environ.get("GITHUB_TOKEN", ""))
 EFFECTIVE_TOKEN = GH_PAT if GH_PAT else GITHUB_TOKEN
-REPO = os.environ.get("GITHUB_REPOSITORY", "youganksaini35-hash/testgitonly")
-RUN_ID = os.environ.get("GITHUB_RUN_ID", "local-dev")
-WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "server.yml")
-WORKFLOW_REF = os.environ.get("WORKFLOW_REF", "main")
+REPO = os.environ.get("GITHUB_REPOSITORY", "youganksaini35-hash/testgitonly").strip()
+RUN_ID = os.environ.get("GITHUB_RUN_ID", "local-dev").strip()
+WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "server.yml").strip()
+WORKFLOW_REF = os.environ.get("WORKFLOW_REF", "main").strip()
 
 # Default run duration: 5.5 hours (19800 seconds)
 RUN_DURATION_SECONDS = int(os.environ.get("RUN_DURATION_SECONDS", "19800"))
