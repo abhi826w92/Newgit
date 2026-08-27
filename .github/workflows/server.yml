@@ -2,6 +2,8 @@ name: Relay Server Daemon
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [relay-handoff, auto-restart, ping]
   schedule:
     # Fallback cron trigger (every 30 minutes to restart if runner terminates)
     - cron: '*/30 * * * *'
@@ -42,12 +44,13 @@ jobs:
       - name: Run Relay Server App
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           WORKFLOW_FILE: "server.yml"
-          WORKFLOW_REF: "main"
+          WORKFLOW_REF: ${{ github.ref_name || 'main' }}
           # Run duration: 330 minutes (5.5 hours) before graceful handoff
           RUN_DURATION_SECONDS: "19800"
         run: |
