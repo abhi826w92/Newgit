@@ -26,7 +26,9 @@ logger = logging.getLogger("TGBotController")
 # Configuration & Environment Variables
 # ---------------------------------------------------------------------------
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
-GH_PAT = os.environ.get("GH_PAT", os.environ.get("GITHUB_TOKEN", "")).strip()
+GH_PAT = os.environ.get("GH_PAT", "").strip()
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+EFFECTIVE_TOKEN = GH_PAT if GH_PAT else GITHUB_TOKEN
 REPO = os.environ.get("GITHUB_REPOSITORY", "youganksaini35-hash/testgitonly")
 RUN_ID = os.environ.get("GITHUB_RUN_ID", "local-dev")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "server.yml")
@@ -250,7 +252,8 @@ def download_tg_file(file_id, destination_path):
 git_sync_lock = threading.Lock()
 
 def git_sync_to_github(commit_message="Update via Telegram Controller"):
-    if not GH_PAT or not REPO:
+    token_to_use = EFFECTIVE_TOKEN
+    if not token_to_use or not REPO:
         return False, "GitHub Token or Repo not set"
     
     with git_sync_lock:
@@ -263,7 +266,7 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
                 except Exception:
                     pass
 
-            remote_url = f"https://{GH_PAT}@github.com/{REPO}.git"
+            remote_url = f"https://x-access-token:{token_to_use}@github.com/{REPO}.git"
             subprocess.run(["git", "config", "user.name", "TelegramController"], cwd=WORKSPACE_DIR, check=True)
             subprocess.run(["git", "config", "user.email", "bot@controller.local"], cwd=WORKSPACE_DIR, check=True)
             
@@ -279,14 +282,15 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
             subprocess.run(["git", "commit", "-m", commit_message], cwd=WORKSPACE_DIR, check=True)
             
             # 3. Push changes directly to GitHub
-            push_res = subprocess.run(["git", "push", remote_url, "main"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+            target_branch = WORKFLOW_REF if WORKFLOW_REF else "main"
+            push_res = subprocess.run(["git", "push", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
             if push_res.returncode == 0:
                 logger.info(f"Auto-sync to cloud complete: {commit_message}")
                 return True, "Cloud sync complete! All changes backed up."
             else:
                 # Rebase with -X ours so local deletions/updates strictly take precedence
-                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, "main"], cwd=WORKSPACE_DIR, capture_output=True)
-                push_res = subprocess.run(["git", "push", remote_url, "main"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
+                push_res = subprocess.run(["git", "push", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
                 if push_res.returncode == 0:
                     logger.info(f"Auto-sync to cloud complete after rebase: {commit_message}")
                     return True, "Cloud sync complete! All changes backed up."
@@ -1133,22 +1137,264 @@ def restart_child_app(script_name=None):
         return False, f"❌ <b>Restart failed:</b>\n" + "\n".join(fail_list)
 
 # ---------------------------------------------------------------------------
-# Self-Trigger: Next Runner Launch (Relay Handoff)
+# Self-Trigger: Next Runner Launch (Relay Handoff) & Diagnostics
 # ---------------------------------------------------------------------------
-def trigger_next_runner():
-    url = f"https://api.github.com/repos/{REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
-    payload = {"ref": WORKFLOW_REF}
-    headers = {
-        "Authorization": f"Bearer {GH_PAT}",
+def check_relay_configuration():
+    """
+    Checks if GH_PAT and workflow dispatch permissions are available.
+    Returns (status_enum, diagnostic_html_string)
+    """
+    if not GH_PAT:
+        return (
+            "MISSING_PAT",
+            "⚠️ <b>Action Needed:</b> <code>GH_PAT</code> secret is not configured in GitHub repository settings.\n\n"
+            "• GitHub Actions security blocks the default <code>GITHUB_TOKEN</code> from self-triggering workflows.\n"
+            "• <b>To ensure seamless 24/7 auto-restart:</b>\n"
+            "  1. Open GitHub ➔ Settings ➔ Secrets and variables ➔ Actions\n"
+            "  2. Add repository secret <code>GH_PAT</code> with a Personal Access Token (PAT) having <code>repo</code> and <code>workflow</code> permissions."
+        )
+
+    token_to_use = GH_PAT
+    auth_headers = {
+        "Authorization": f"Bearer {token_to_use}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28"
     }
+
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        return resp.status_code == 204
+        url = f"https://api.github.com/repos/{REPO}/actions/workflows"
+        resp = requests.get(url, headers=auth_headers, timeout=10)
+        if resp.status_code == 200:
+            return ("OK", "🟢 <b>GH_PAT Verified:</b> Workflow dispatch permissions confirmed. 5.5-hour relay transitions are fully autonomous!")
+        elif resp.status_code == 401:
+            return ("INVALID_PAT", "❌ <b>Invalid GH_PAT:</b> GitHub returned <code>HTTP 401 Unauthorized</code> (token is expired or incorrect).")
+        elif resp.status_code == 403:
+            return ("INSUFFICIENT_PERMISSIONS", "⚠️ <b>Insufficient Permissions:</b> <code>HTTP 403 Forbidden</code>. Ensure the PAT has <code>workflow</code> & <code>actions:write</code> scopes.")
+        elif resp.status_code == 404:
+            return ("NOT_FOUND", f"⚠️ <b>Repo/Workflows Not Found:</b> <code>HTTP 404</code> for <code>{REPO}</code>. Check repo name and PAT <code>repo</code> scope.")
+        else:
+            return ("UNKNOWN_STATUS", f"⚠️ GitHub API returned <code>HTTP {resp.status_code}</code>: {html.escape(resp.text[:150])}")
     except Exception as e:
-        logger.error(f"Workflow dispatch error: {e}")
-        return False
+        return ("NETWORK_ERROR", f"⚠️ Connection error during relay check: {html.escape(str(e))}")
+
+
+def trigger_next_runner_detailed():
+    """
+    Multi-Strategy Autonomous Runner Dispatch:
+    1. Workflow Dispatch API via filename ('server.yml')
+    2. Workflow Dispatch API via dynamic integer Workflow ID
+    3. Repository Dispatch API ('relay-handoff' event)
+    4. GitHub CLI tool ('gh workflow run')
+    
+    Returns: (bool, str) -> (is_success, detail_message)
+    """
+    token_to_use = EFFECTIVE_TOKEN
+    if not token_to_use:
+        return False, "No GitHub token (GH_PAT or GITHUB_TOKEN) available in environment."
+
+    auth_headers = {
+        "Authorization": f"Bearer {token_to_use}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+
+    errors = []
+
+    # 1. Strategy 1: Standard Workflow Dispatch via File Name
+    try:
+        url_file = f"https://api.github.com/repos/{REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+        payload_file = {"ref": WORKFLOW_REF}
+        resp = requests.post(url_file, headers=auth_headers, json=payload_file, timeout=15)
+        if resp.status_code == 204:
+            logger.info(f"✅ Strategy 1 succeeded: Workflow dispatch via '{WORKFLOW_FILE}' (HTTP 204)")
+            return True, f"Workflow dispatch via '{WORKFLOW_FILE}' succeeded."
+        else:
+            msg = f"Strategy 1 (filename '{WORKFLOW_FILE}') returned HTTP {resp.status_code}: {resp.text.strip()}"
+            logger.warning(msg)
+            errors.append(msg)
+    except Exception as e:
+        msg = f"Strategy 1 exception: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+
+    # 2. Strategy 2: Dynamic Workflow ID Lookup & Dispatch
+    try:
+        url_list = f"https://api.github.com/repos/{REPO}/actions/workflows"
+        resp_list = requests.get(url_list, headers=auth_headers, timeout=15)
+        if resp_list.status_code == 200:
+            workflows_list = resp_list.json().get("workflows", [])
+            target_id = None
+            for wf in workflows_list:
+                wpath = wf.get("path", "")
+                wname = wf.get("name", "")
+                wid = wf.get("id")
+                if WORKFLOW_FILE in wpath or WORKFLOW_FILE == str(wid) or "Relay" in wname:
+                    target_id = wid
+                    break
+            if target_id:
+                url_id = f"https://api.github.com/repos/{REPO}/actions/workflows/{target_id}/dispatches"
+                resp_id = requests.post(url_id, headers=auth_headers, json={"ref": WORKFLOW_REF}, timeout=15)
+                if resp_id.status_code == 204:
+                    logger.info(f"✅ Strategy 2 succeeded: Workflow dispatch via ID {target_id} (HTTP 204)")
+                    return True, f"Workflow dispatch via ID {target_id} succeeded."
+                else:
+                    msg = f"Strategy 2 (workflow ID {target_id}) returned HTTP {resp_id.status_code}: {resp_id.text.strip()}"
+                    logger.warning(msg)
+                    errors.append(msg)
+    except Exception as e:
+        msg = f"Strategy 2 exception: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+
+    # 3. Strategy 3: Repository Dispatch API ('relay-handoff' event)
+    try:
+        url_repo = f"https://api.github.com/repos/{REPO}/dispatches"
+        payload_repo = {
+            "event_type": "relay-handoff",
+            "client_payload": {
+                "ref": WORKFLOW_REF,
+                "timestamp": int(time.time()),
+                "prev_run_id": str(RUN_ID)
+            }
+        }
+        resp_repo = requests.post(url_repo, headers=auth_headers, json=payload_repo, timeout=15)
+        if resp_repo.status_code == 204:
+            logger.info("✅ Strategy 3 succeeded: Repository dispatch ('relay-handoff') (HTTP 204)")
+            return True, "Repository dispatch ('relay-handoff') succeeded."
+        else:
+            msg = f"Strategy 3 (repository_dispatch) returned HTTP {resp_repo.status_code}: {resp_repo.text.strip()}"
+            logger.warning(msg)
+            errors.append(msg)
+    except Exception as e:
+        msg = f"Strategy 3 exception: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+
+    # 4. Strategy 4: GitHub CLI ('gh workflow run')
+    try:
+        gh_cmd = ["gh", "workflow", "run", WORKFLOW_FILE, "--ref", WORKFLOW_REF, "-R", REPO]
+        gh_env = {**os.environ, "GH_TOKEN": token_to_use, "GITHUB_TOKEN": token_to_use}
+        gh_res = subprocess.run(gh_cmd, capture_output=True, text=True, timeout=15, env=gh_env)
+        if gh_res.returncode == 0:
+            logger.info("✅ Strategy 4 succeeded: gh workflow run CLI tool")
+            return True, "GitHub CLI dispatch succeeded."
+        else:
+            msg = f"Strategy 4 (gh CLI) returned code {gh_res.returncode}: {gh_res.stderr.strip()}"
+            logger.warning(msg)
+            errors.append(msg)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        msg = f"Strategy 4 exception: {e}"
+        logger.warning(msg)
+        errors.append(msg)
+
+    final_err = " | ".join(errors) if errors else "Unknown dispatch error"
+    return False, final_err
+
+
+def trigger_next_runner():
+    """Backward compatibility wrapper."""
+    ok, _ = trigger_next_runner_detailed()
+    return ok
+
+
+def execute_relay_handoff_sequence(reason="5.5 Hours reached"):
+    """
+    Executes the robust 5.5-hour relay handoff sequence:
+    1. Records active running scripts to bot_config.json
+    2. Syncs and pushes repository changes to GitHub
+    3. Triggers the next runner phase with retries
+    4. Handles failures gracefully without killing active scripts abruptly
+    """
+    global IS_RUNNING
+    logger.info(f"⏳ Starting Relay Handoff Sequence ({reason})...")
+
+    active_now = list(get_active_running_processes().keys())
+    config["active_scripts"] = active_now
+    save_config(config)
+
+    resume_note = ""
+    if active_now:
+        resume_note = f"\n🚀 <i>{len(active_now)} active scripts will auto-resume in new phase:</i>\n" + "\n".join([f"• <code>{s}</code>" for s in active_now])
+
+    notify_all_admins(
+        f"🔄 <b>Relay Transition ({reason}):</b>\n"
+        "Backing up workspace and transitioning to next runner..."
+        + resume_note
+    )
+
+    # 1. Push workspace changes to GitHub
+    sync_ok, sync_msg = git_sync_to_github(f"Auto-backup before Relay Handoff ({reason})")
+    if not sync_ok:
+        logger.warning(f"Initial sync warning: {sync_msg}. Retrying in 2 seconds...")
+        time.sleep(2)
+        git_sync_to_github(f"Auto-backup retry before Relay Handoff ({reason})")
+
+    # 2. Multi-attempt retry loop to dispatch next runner
+    handoff_ok = False
+    last_err = ""
+    for attempt in range(1, 6):
+        logger.info(f"🔄 Triggering next runner (attempt {attempt}/5)...")
+        ok, msg = trigger_next_runner_detailed()
+        if ok:
+            handoff_ok = True
+            logger.info(f"✅ Next runner successfully triggered on attempt {attempt}: {msg}")
+            notify_all_admins(
+                f"✅ <b>Relay Transition Dispatched:</b>\n"
+                f"New runner initiated successfully (attempt {attempt}/5).\n"
+                f"Gracefully shutting down current runner."
+            )
+            break
+        else:
+            last_err = msg
+            logger.error(f"Handoff trigger attempt {attempt} failed: {msg}")
+            time.sleep(5)
+
+    if handoff_ok:
+        IS_RUNNING = False
+        stop_child_app(script_name=None, clear_active=False)
+        time.sleep(5)
+        logger.info("Handoff sequence complete. Exiting cleanly.")
+        sys.exit(0)
+    else:
+        logger.error(f"❌ Relay handoff failed after 5 attempts: {last_err}")
+        err_guide = ""
+        if "403" in last_err or "Resource not accessible" in last_err or not GH_PAT:
+            err_guide = (
+                "\n\n🔑 <b>Cause:</b> Missing or invalid <code>GH_PAT</code> repository secret.\n"
+                "GitHub Actions blocks default <code>GITHUB_TOKEN</code> from self-triggering workflows.\n"
+                "<b>Fix:</b> Add a GitHub Personal Access Token as secret <code>GH_PAT</code> with <code>workflow</code> & <code>repo</code> permissions in Repo Settings."
+            )
+
+        notify_all_admins(
+            f"❌ <b>Relay Auto-Restart Failed:</b>\n"
+            f"Error: <code>{html.escape(last_err[:250])}</code>"
+            f"{err_guide}\n\n"
+            f"⚠️ <i>Old runner and active scripts remain running. Please configure GH_PAT or trigger workflow manually.</i>",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔄 Retry Handoff Now", "callback_data": "menu_force_handoff"}],
+                    [{"text": "📊 Dashboard", "callback_data": "menu_main"}]
+                ]
+            }
+        )
+
+        # Background retry thread (attempts every 60s without blocking)
+        def background_retry_loop():
+            for retry_i in range(1, 15):
+                time.sleep(60)
+                if not IS_RUNNING:
+                    break
+                logger.info(f"Background retry {retry_i} for relay handoff...")
+                ok, msg = trigger_next_runner_detailed()
+                if ok:
+                    notify_all_admins(f"✅ <b>Relay Handoff Succeeded on Background Retry #{retry_i}!</b> Transitioning to new runner...")
+                    stop_child_app(script_name=None, clear_active=False)
+                    time.sleep(5)
+                    sys.exit(0)
+
+        threading.Thread(target=background_retry_loop, daemon=True, name="HandoffRetryThread").start()
 
 # ---------------------------------------------------------------------------
 # Visual UI & Keyboards
@@ -2257,10 +2503,11 @@ def prompt_stop_menu(chat_id, user_id, message_id=None):
 def show_server_info_view(chat_id, message_id=None):
     # Fetch repository details via GitHub API
     repo_info = {}
+    token_to_use = EFFECTIVE_TOKEN
     try:
         url = f"https://api.github.com/repos/{REPO}"
         headers = {
-            "Authorization": f"Bearer {GH_PAT}" if GH_PAT else "",
+            "Authorization": f"Bearer {token_to_use}" if token_to_use else "",
             "Accept": "application/vnd.github+json"
         }
         resp = requests.get(url, headers=headers, timeout=10)
@@ -2292,6 +2539,12 @@ def show_server_info_view(chat_id, message_id=None):
     created_at = repo_info.get("created_at", "N/A")[:10] if repo_info.get("created_at") else "N/A"
     owner_login = repo_info.get("owner", {}).get("login", repo_name.split("/")[0] if "/" in repo_name else "N/A")
     repo_html_url = repo_info.get("html_url", f"https://github.com/{REPO}")
+
+    # Relay Status Diagnostic
+    if GH_PAT:
+        relay_status_str = "🟢 <b>Ready & Verified</b> (<code>GH_PAT</code> active)"
+    else:
+        relay_status_str = "⚠️ <b>Action Required</b> (Missing <code>GH_PAT</code> secret)"
     
     text = (
         "ℹ️ <b>Cloud Server & Repository Intelligence</b>\n"
@@ -2305,6 +2558,7 @@ def show_server_info_view(chat_id, message_id=None):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "⚡ <b>Live Relay Server Status:</b>\n"
         f"• <b>Daemon Status:</b> 🟢 <b>Active & Healthy</b>\n"
+        f"• <b>Relay Auto-Restart:</b> {relay_status_str}\n"
         f"• <b>Active Scripts:</b> {active_summary}\n"
         f"• <b>Current Run ID:</b> <code>#{RUN_ID}</code>\n"
         f"• <b>Current Phase Uptime:</b> <code>{hours}h {minutes}m {seconds}s</code>\n"
@@ -2318,6 +2572,10 @@ def show_server_info_view(chat_id, message_id=None):
         "inline_keyboard": [
             [
                 {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
+                {"text": "🧪 Test Relay Handoff", "callback_data": "menu_test_handoff"}
+            ],
+            [
+                {"text": "⚡ Trigger Handoff Now", "callback_data": "menu_force_handoff_confirm"},
                 {"text": "🌐 Open on GitHub", "url": repo_html_url}
             ],
             [
@@ -2329,6 +2587,10 @@ def show_server_info_view(chat_id, message_id=None):
             ]
         ]
     }
+    if message_id:
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+    else:
+        send_tg_message(chat_id, text, reply_markup=markup)
     
 def format_bytes_human(size_in_bytes):
     """Formats raw bytes into human readable KB, MB, GB."""
@@ -3702,6 +3964,59 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         answer_callback(callback_id, "ℹ️ Loading Repo Intelligence...")
         show_server_info_view(chat_id, message_id)
 
+    # 15b. Test Relay Handoff API
+    elif data == "menu_test_handoff":
+        answer_callback(callback_id, "🧪 Testing GitHub Dispatch API...")
+        status_enum, status_msg = check_relay_configuration()
+        text = (
+            f"🧪 <b>Relay Dispatch Diagnostics:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>GH_PAT Secret:</b> {'🟢 Configured' if GH_PAT else '⚠️ Missing / Not Set'}\n"
+            f"• <b>Target Repo:</b> <code>{REPO}</code>\n"
+            f"• <b>Workflow File:</b> <code>{WORKFLOW_FILE}</code>\n"
+            f"• <b>Target Ref:</b> <code>{WORKFLOW_REF}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{status_msg}"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Re-Test", "callback_data": "menu_test_handoff"}],
+                [{"text": "🔙 Back to Info", "callback_data": "menu_server_info"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 15c. Force Handoff Confirmation Prompt
+    elif data == "menu_force_handoff_confirm":
+        answer_callback(callback_id)
+        text = (
+            "⚡ <b>Manual Relay Handoff Confirmation</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Are you sure you want to trigger the Relay Transition now?\n\n"
+            "• Backs up workspace files & encrypted state to GitHub.\n"
+            "• Launches next runner phase via GitHub Actions.\n"
+            "• All running scripts auto-resume in the new phase.\n"
+            "• Current runner gracefully shuts down."
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🚀 Yes, Launch Next Runner Now", "callback_data": "menu_force_handoff_do"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_server_info"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 15d. Execute Manual Relay Handoff
+    elif data in ["menu_force_handoff", "menu_force_handoff_do"]:
+        answer_callback(callback_id, "🚀 Initiating Relay Handoff...", show_alert=True)
+        edit_tg_message(
+            chat_id,
+            message_id,
+            "🔄 <b>Executing Relay Handoff Sequence...</b>\n"
+            "Backing up workspace and dispatching new runner phase..."
+        )
+        threading.Thread(target=execute_relay_handoff_sequence, args=("Manual Telegram Command",), daemon=True).start()
+
 # ---------------------------------------------------------------------------
 # Document & File Upload Handler
 # ---------------------------------------------------------------------------
@@ -4128,6 +4443,15 @@ def main():
     
     # Restore all private environments from encoded vault (100% safe from secret scanner!)
     restore_all_env_vaults_on_boot()
+
+    # Check relay configuration on boot and notify admins if action is needed
+    status_enum, status_msg = check_relay_configuration()
+    if status_enum != "OK":
+        logger.warning(f"Relay configuration check on boot: {status_enum}")
+        def delayed_warn():
+            time.sleep(4.0)
+            notify_all_admins(status_msg)
+        threading.Thread(target=delayed_warn, daemon=True).start()
     
     # Seamless Multi-Script Relay Persistence: Auto-resume active scripts
     active_list = config.get("active_scripts")
@@ -4179,32 +4503,12 @@ def main():
     while IS_RUNNING:
         elapsed = time.time() - START_TIME
         if elapsed >= RUN_DURATION_SECONDS:
-            logger.info(f"⏳ 5.5 Hours reached. Triggering Handoff...")
+            logger.info("⏳ 5.5 Hours reached. Triggering Relay Handoff...")
             break
         time.sleep(5)
     
     # --- HANDOFF SEQUENCE ---
-    IS_RUNNING = False # Stop Telegram polling immediately on old runner
-    
-    active_now = list(get_active_running_processes().keys())
-    config["active_scripts"] = active_now
-    save_config(config)
-    
-    resume_note = ""
-    if active_now:
-        resume_note = f"\n🚀 <i>{len(active_now)} active scripts will auto-resume in new phase:</i>\n" + "\n".join([f"• <code>{s}</code>" for s in active_now])
-    
-    notify_all_admins(
-        "🔄 <b>Relay Transition (5.5 Hours):</b>\n"
-        "Backing up workspace and transitioning to next runner..."
-        + resume_note
-    )
-    
-    stop_child_app(script_name=None, clear_active=False) # Stop processes without erasing active_scripts list!
-    git_sync_to_github("Auto-backup before Relay Handoff")
-    trigger_next_runner()
-    time.sleep(5)
-    logger.info("Handoff sequence complete. Exiting.")
+    execute_relay_handoff_sequence("5.5 Hours reached")
 
 if __name__ == "__main__":
     main()
