@@ -2571,96 +2571,111 @@ def prompt_stop_menu(chat_id, user_id, message_id=None):
         send_tg_message(chat_id, text, reply_markup=markup)
 
 def show_server_info_view(chat_id, message_id=None):
-    # Fetch repository details via GitHub API
-    repo_info = {}
-    token_to_use = EFFECTIVE_TOKEN
     try:
-        url = f"https://api.github.com/repos/{REPO}"
-        headers = {
-            "Authorization": f"Bearer {token_to_use}" if token_to_use else "",
-            "Accept": "application/vnd.github+json"
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            repo_info = resp.json()
-    except Exception as e:
-        logger.error(f"Error fetching repo info: {e}")
+        # Fetch repository details via GitHub API (with safe timeout & fallback)
+        repo_info = {}
+        token_to_use = EFFECTIVE_TOKEN
+        try:
+            url = f"https://api.github.com/repos/{REPO}"
+            headers = {"Accept": "application/vnd.github+json"}
+            if token_to_use:
+                headers["Authorization"] = f"Bearer {token_to_use}"
+            resp = requests.get(url, headers=headers, timeout=4)
+            if resp.status_code == 200:
+                repo_info = resp.json()
+        except Exception as e:
+            logger.debug(f"GitHub API info query: {e}")
 
-    # Telemetry
-    uptime_sec = int(time.time() - START_TIME)
-    hours, remainder = divmod(uptime_sec, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    
-    relay_remain = max(0, RUN_DURATION_SECONDS - uptime_sec)
-    rh, rr = divmod(relay_remain, 3600)
-    rm, rs = divmod(rr, 60)
-    
-    active = get_active_running_processes()
-    count = len(active)
-    if count == 0:
-        active_summary = "🔴 <i>None (Stopped / Standby)</i>"
-    else:
-        active_summary = f"🟢 <b>{count} Active:</b> " + ", ".join([f"<code>{s}</code>" for s in sorted(active.keys())])
-    
-    repo_name = repo_info.get("full_name", REPO)
-    visibility = "🌍 Public" if not repo_info.get("private", False) else "🔒 Private"
-    repo_size_kb = repo_info.get("size", 0)
-    default_branch = repo_info.get("default_branch", "main")
-    created_at = repo_info.get("created_at", "N/A")[:10] if repo_info.get("created_at") else "N/A"
-    owner_login = repo_info.get("owner", {}).get("login", repo_name.split("/")[0] if "/" in repo_name else "N/A")
-    repo_html_url = repo_info.get("html_url", f"https://github.com/{REPO}")
+        # Telemetry
+        uptime_sec = int(time.time() - START_TIME)
+        hours, remainder = divmod(uptime_sec, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        relay_remain = max(0, RUN_DURATION_SECONDS - uptime_sec)
+        rh, rr = divmod(relay_remain, 3600)
+        rm, rs = divmod(rr, 60)
+        
+        active = get_active_running_processes()
+        count = len(active)
+        if count == 0:
+            active_summary = "🔴 <i>None (Stopped / Standby)</i>"
+        else:
+            active_summary = f"🟢 <b>{count} Active:</b> " + ", ".join([f"<code>{s}</code>" for s in sorted(active.keys())])
+        
+        repo_name = repo_info.get("full_name") if isinstance(repo_info.get("full_name"), str) else REPO
+        visibility = "🌍 Public" if not repo_info.get("private", False) else "🔒 Private"
+        repo_size_kb = repo_info.get("size", 0)
+        default_branch = repo_info.get("default_branch") if isinstance(repo_info.get("default_branch"), str) else "main"
+        created_at = repo_info.get("created_at", "N/A")[:10] if repo_info.get("created_at") else "N/A"
+        
+        owner_data = repo_info.get("owner")
+        if isinstance(owner_data, dict) and owner_data.get("login"):
+            owner_login = owner_data.get("login")
+        else:
+            owner_login = repo_name.split("/")[0] if "/" in repo_name else "N/A"
+            
+        repo_html_url = f"https://github.com/{REPO}"
+        if isinstance(repo_info.get("html_url"), str) and repo_info["html_url"].startswith("http"):
+            repo_html_url = repo_info["html_url"]
 
-    # Relay Status Diagnostic
-    if GH_PAT:
-        relay_status_str = "🟢 <b>Ready & Verified</b> (<code>GH_PAT</code> active)"
-    else:
-        relay_status_str = "⚠️ <b>Action Required</b> (Missing <code>GH_PAT</code> secret)"
-    
-    text = (
-        "ℹ️ <b>Cloud Server & Repository Intelligence</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🌐 <b>Cloud Repository:</b> <code>{repo_name}</code>\n"
-        f"👑 <b>Owner:</b> <code>{owner_login}</code>\n"
-        f"🛡️ <b>Visibility:</b> <b>{visibility}</b>\n"
-        f"🌿 <b>Default Branch:</b> <code>{default_branch}</code>\n"
-        f"📦 <b>Repo Size:</b> <code>{repo_size_kb} KB</code>\n"
-        f"📅 <b>Created On:</b> <code>{created_at}</code>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ <b>Live Relay Server Status:</b>\n"
-        f"• <b>Daemon Status:</b> 🟢 <b>Active & Healthy</b>\n"
-        f"• <b>Relay Auto-Restart:</b> {relay_status_str}\n"
-        f"• <b>Active Scripts:</b> {active_summary}\n"
-        f"• <b>Current Run ID:</b> <code>#{RUN_ID}</code>\n"
-        f"• <b>Current Phase Uptime:</b> <code>{hours}h {minutes}m {seconds}s</code>\n"
-        f"• <b>Next Relay Handoff In:</b> <code>{rh}h {rm}m {rs}s</code> (Auto-Resuming)\n"
-        f"• <b>Security Vault:</b> 🔐 <b>AES-256 Authenticated Encryption (Active)</b>\n"
-        f"• <b>Secret Scanner Shield:</b> 🛡️ <b>100% Protected (.gitignore active)</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
-    )
-    
-    markup = {
-        "inline_keyboard": [
-            [
-                {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
-                {"text": "🧪 Test Relay Handoff", "callback_data": "menu_test_handoff"}
-            ],
-            [
-                {"text": "⚡ Trigger Handoff Now", "callback_data": "menu_force_handoff_confirm"},
-                {"text": "🌐 Open on GitHub", "url": repo_html_url}
-            ],
-            [
-                {"text": "🚀 Scripts Runner", "callback_data": "menu_runner"},
-                {"text": "📂 View Files", "callback_data": "menu_files"}
-            ],
-            [
-                {"text": "🔙 Main Menu", "callback_data": "menu_main"}
+        # Relay Status Diagnostic
+        if GH_PAT:
+            relay_status_str = "🟢 <b>Ready & Verified</b> (<code>GH_PAT</code> active)"
+        else:
+            relay_status_str = "⚠️ <b>Action Required</b> (Missing <code>GH_PAT</code> secret)"
+        
+        text = (
+            "ℹ️ <b>Cloud Server & Repository Intelligence</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 <b>Cloud Repository:</b> <code>{repo_name}</code>\n"
+            f"👑 <b>Owner:</b> <code>{owner_login}</code>\n"
+            f"🛡️ <b>Visibility:</b> <b>{visibility}</b>\n"
+            f"🌿 <b>Default Branch:</b> <code>{default_branch}</code>\n"
+            f"📦 <b>Repo Size:</b> <code>{repo_size_kb} KB</code>\n"
+            f"📅 <b>Created On:</b> <code>{created_at}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ <b>Live Relay Server Status:</b>\n"
+            f"• <b>Daemon Status:</b> 🟢 <b>Active & Healthy</b>\n"
+            f"• <b>Relay Auto-Restart:</b> {relay_status_str}\n"
+            f"• <b>Active Scripts:</b> {active_summary}\n"
+            f"• <b>Current Run ID:</b> <code>#{RUN_ID}</code>\n"
+            f"• <b>Current Phase Uptime:</b> <code>{hours}h {minutes}m {seconds}s</code>\n"
+            f"• <b>Next Relay Handoff In:</b> <code>{rh}h {rm}m {rs}s</code> (Auto-Resuming)\n"
+            f"• <b>Security Vault:</b> 🔐 <b>AES-256 Authenticated Encryption (Active)</b>\n"
+            f"• <b>Secret Scanner Shield:</b> 🛡️ <b>100% Protected (.gitignore active)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
+                    {"text": "🧪 Test Relay Handoff", "callback_data": "menu_test_handoff"}
+                ],
+                [
+                    {"text": "⚡ Trigger Handoff Now", "callback_data": "menu_force_handoff_confirm"},
+                    {"text": "🌐 Open on GitHub", "url": repo_html_url}
+                ],
+                [
+                    {"text": "🚀 Scripts Runner", "callback_data": "menu_runner"},
+                    {"text": "📂 View Files", "callback_data": "menu_files"}
+                ],
+                [
+                    {"text": "🔙 Main Menu", "callback_data": "menu_main"}
+                ]
             ]
-        ]
-    }
-    if message_id:
-        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
-    else:
-        send_tg_message(chat_id, text, reply_markup=markup)
+        }
+        if message_id:
+            edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+        else:
+            send_tg_message(chat_id, text, reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Failed to render server info view: {e}")
+        fallback_text = f"ℹ️ <b>Server Info:</b>\n• <b>Uptime:</b> Active\n• <b>Repo:</b> <code>{REPO}</code>\n• <b>Run ID:</b> <code>#{RUN_ID}</code>"
+        if message_id:
+            edit_tg_message(chat_id, message_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
+        else:
+            send_tg_message(chat_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
     
 def format_bytes_human(size_in_bytes):
     """Formats raw bytes into human readable KB, MB, GB."""
