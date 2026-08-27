@@ -10,6 +10,7 @@ import struct
 import shutil
 import asyncio
 import subprocess
+from urllib.parse import quote
 from collections import OrderedDict
 
 # Auto-Install Missing Dependencies on First Launch
@@ -1136,6 +1137,19 @@ async def adaptive_parallel_stream_generator(
             t.cancel()
         await client.disconnect()
 
+def make_content_disposition(disposition_type: str, filename: str) -> str:
+    """
+    RFC 5987 / RFC 6266 compliant Content-Disposition header generator.
+    Safely encodes non-ASCII characters & emojis (🚀, 👋, Hindi, etc.) in UTF-8
+    preventing HTTP 'latin-1' codec encoding crashes.
+    """
+    ascii_name = filename.encode('ascii', 'ignore').decode('ascii').strip()
+    ascii_name = re.sub(r'[\r\n"\\\x00-\x1f]', '_', ascii_name)
+    if not ascii_name:
+        ascii_name = "file.bin"
+    encoded_name = quote(filename, safe='')
+    return f"{disposition_type}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
+
 @app.get("/api/download/{message_id}")
 @app.get("/api/stream/{message_id}")
 async def download_or_stream_file(
@@ -1147,6 +1161,7 @@ async def download_or_stream_file(
 ):
     """
     High-Performance Adaptive 4-8 Parallel MTProto Stream Engine with HTTP 206 Range seeking.
+    Full RFC 5987 UTF-8 support for emoji & unicode filenames (e.g. 🚀, 👋, Hindi).
     """
     client = await get_tg_client(session_string, api_id, api_hash)
     try:
@@ -1155,7 +1170,18 @@ async def download_or_stream_file(
             await client.disconnect()
             raise HTTPException(status_code=404, detail="File message not found in Saved Messages")
 
-        file_name = msg.file.name if msg.file and msg.file.name else f"file_{message_id}"
+        file_name = None
+        if msg.message and msg.message.startswith(FILE_PREFIX):
+            try:
+                meta = json.loads(msg.message[len(FILE_PREFIX):])
+                file_name = meta.get("customName") or meta.get("name")
+            except Exception:
+                pass
+        if not file_name and msg.file and msg.file.name:
+            file_name = msg.file.name
+        if not file_name:
+            file_name = f"file_{message_id}"
+
         file_size = msg.file.size if msg.file and msg.file.size else 0
         mime_type = msg.file.mime_type if msg.file and msg.file.mime_type else "application/octet-stream"
 
@@ -1174,10 +1200,10 @@ async def download_or_stream_file(
                     "Content-Range": f"bytes {start}-{end}/{file_size}",
                     "Accept-Ranges": "bytes",
                     "Content-Length": str(length),
-                    "Content-Disposition": f'inline; filename="{file_name}"',
+                    "Content-Disposition": make_content_disposition("inline", file_name),
                     "Cache-Control": "public, max-age=7200, stale-while-revalidate=86400",
                     "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges"
+                    "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Disposition"
                 }
                 return StreamingResponse(
                     adaptive_parallel_stream_generator(client, msg.media, file_size, start, length, message_id),
@@ -1188,10 +1214,11 @@ async def download_or_stream_file(
 
         # Full Stream Download (HTTP 200) with Adaptive Parallel Pipeline
         headers = {
-            "Content-Disposition": f'attachment; filename="{file_name}"',
+            "Content-Disposition": make_content_disposition("attachment", file_name),
             "Access-Control-Allow-Origin": "*",
             "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=7200, stale-while-revalidate=86400"
+            "Cache-Control": "public, max-age=7200, stale-while-revalidate=86400",
+            "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Disposition"
         }
         if file_size:
             headers["Content-Length"] = str(file_size)
