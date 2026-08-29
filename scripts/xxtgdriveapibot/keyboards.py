@@ -89,12 +89,14 @@ def files_list_kb(items: list, page: int, total_items: int, per_page: int = 6, f
     
     return buttons
 
-def file_details_kb(file_id: str, is_starred: bool = False, download_url: str = None, folder_id: str = "all", page: int = 1):
+def file_details_kb(file_id: str, is_starred: bool = False, download_url: str = None, stream_url: str = None, folder_id: str = "all", page: int = 1):
     """Keyboard for a single file view with complete management actions."""
     buttons = []
     
     if download_url:
         buttons.append([Button.url("⬇️ Direct Fast Download Link", download_url)])
+    if stream_url:
+        buttons.append([Button.url("▶️ Direct Online Stream Link", stream_url)])
     
     # Send file directly in chat
     buttons.append([Button.inline("📥 Send File to Chat", f"fsend:{file_id}".encode('utf-8'))])

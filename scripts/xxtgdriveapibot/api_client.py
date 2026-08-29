@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import urllib.parse
 import httpx
 import aiohttp
 import logging
@@ -66,22 +67,74 @@ async def get_user_profile(api_key: str):
         resp = await client.get(url, headers=headers)
         return resp.json()
 
-async def list_files(api_key: str, folder_id: str = "all", limit: int = 1000, offset_id: int = None, search: str = None):
-    """List files with full scanning."""
+async def list_files(api_key: str, folder_id: str = "all", limit: int = 100, offset_id: int = None, search: str = None):
+    """List files with reliable, fast batch scanning and auto-pagination."""
     url = f"{API_BASE_URL}/v1/files"
     headers = _get_headers(api_key)
-    params = {
-        "folder_id": folder_id or "all",
-        "limit": limit
+    
+    # If a specific offset or search is requested, do single fetch
+    if offset_id is not None or search:
+        params = {
+            "folder_id": folder_id or "all",
+            "limit": min(limit, 100)
+        }
+        if offset_id:
+            params["offset_id"] = offset_id
+        if search:
+            params["search"] = search
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                resp = await client.get(url, headers=headers, params=params)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception as e:
+            logger.error(f"Error in list_files single fetch: {e}")
+        return {"status": "error", "items": [], "total": 0}
+
+    # Fetch all items across fast 100-item batches
+    all_items = []
+    curr_offset = None
+    target_folder = folder_id or "all"
+    max_batches = 15  # Up to 1,500 files
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for _ in range(max_batches):
+                params = {
+                    "folder_id": target_folder,
+                    "limit": 100
+                }
+                if curr_offset:
+                    params["offset_id"] = curr_offset
+
+                resp = await client.get(url, headers=headers, params=params)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                if data.get("status") != "success":
+                    break
+                items = data.get("items", [])
+                if not items:
+                    break
+                all_items.extend(items)
+                
+                # Stop if no more pages
+                if not data.get("has_more") or not data.get("next_offset_id"):
+                    break
+                curr_offset = data.get("next_offset_id")
+                if curr_offset == 0:
+                    break
+    except Exception as e:
+        logger.error(f"Error scanning files in list_files: {e}")
+
+    return {
+        "status": "success",
+        "items": all_items,
+        "total": len(all_items),
+        "has_more": False,
+        "next_offset_id": 0
     }
-    if offset_id:
-        params["offset_id"] = offset_id
-    if search:
-        params["search"] = search
-        
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url, headers=headers, params=params)
-        return resp.json()
+
 
 async def get_storage_stats_realtime(api_key: str):
     """Calculate 100% accurate real-time storage statistics from live scan."""
@@ -524,10 +577,12 @@ async def get_file_download_info(api_key: str, file_id: str) -> dict:
 
         if dl_url:
             expiry_str = format_date(exp_ts)
+            streamon_url = f"https://streamon.pages.dev/?url={urllib.parse.quote(dl_url, safe='')}"
             result = {
                 "download_url": dl_url,
+                "stream_url": streamon_url,
+                "raw_stream_url": share_data.get("stream_url", ""),
                 "share_url": share_data.get("share_url", ""),
-                "stream_url": share_data.get("stream_url", ""),
                 "expires_at": exp_ts,
                 "expires_in_hours": hours,
                 "validity_text": f"{hours} Hours",
@@ -538,10 +593,13 @@ async def get_file_download_info(api_key: str, file_id: str) -> dict:
 
     # Fallback to API Key query parameter
     exp_fallback = int(now + 86400)
+    fallback_dl = f"{API_BASE_URL}/v1/files/{file_id_str}/download?api_key={clean_key}"
+    fallback_stream = f"https://streamon.pages.dev/?url={urllib.parse.quote(fallback_dl, safe='')}"
     fallback_res = {
-        "download_url": f"{API_BASE_URL}/v1/files/{file_id_str}/download?api_key={clean_key}",
+        "download_url": fallback_dl,
+        "stream_url": fallback_stream,
+        "raw_stream_url": "",
         "share_url": "",
-        "stream_url": "",
         "validity_text": "24 Hours",
         "expiry_date": format_date(exp_fallback),
         "expires_at": exp_fallback

@@ -176,7 +176,7 @@ async def get_cached_or_fetch_files(api_key: str, user_id: int, force_refresh: b
         if cached is not None:
             return cached
 
-    res = await list_files(api_key, folder_id="all", limit=1000)
+    res = await list_files(api_key, folder_id="all")
     if res.get("status") == "success":
         items = res.get("items", [])
         file_cache.set(user_id, items)
@@ -222,13 +222,15 @@ def format_file_card_text(
     dl_info: dict,
     folder_name: str = None
 ) -> str:
-    """Format full file metadata card with direct download link, validity, and expiration."""
+    """Format full file metadata card with direct download link, streaming link, validity, and expiration."""
     icon = get_mime_icon(mime, name)
     dl_url = dl_info.get("download_url", "")
+    stream_url = dl_info.get("stream_url", "")
     validity = dl_info.get("validity_text", "24 Hours")
     expiry = dl_info.get("expiry_date", "N/A")
 
     folder_line = f"📂 <b>Folder:</b> 📁 <code>{clean_html(folder_name)}</code>\n" if folder_name and folder_name != "root" else ""
+    stream_line = f"▶️ <b>Direct Online Stream Link:</b>\n<code>{stream_url}</code>\n\n" if stream_url else ""
 
     return (
         f"{icon} <b>FILE DETAILS</b>\n\n"
@@ -240,6 +242,7 @@ def format_file_card_text(
         f"📅 <b>Uploaded:</b> {format_date(created_at)}\n"
         f"📍 <b>Storage:</b> {clean_html(dest)}\n\n"
         f"🔗 <b>Direct Fast Download Link:</b>\n<code>{dl_url}</code>\n\n"
+        f"{stream_line}"
         f"⏱️ <b>Link Validity:</b> <code>{validity}</code>\n"
         f"⏳ <b>Expires:</b> <code>{expiry}</code>"
     )
@@ -267,27 +270,38 @@ async def reject_non_admin(event, user_id: int):
     await event.respond(text, parse_mode="html")
 
 async def send_main_menu(event, user_id: int, first_name: str, edit: bool = False):
-    """Show the Main Menu dashboard with target folder and real-time daily API usage."""
+    """Show the Main Menu dashboard with target folder and real-time live daily & hourly API quota."""
     api_key = get_user_api_key(user_id)
     profile_info = "Connected"
     daily_req_text = "N/A"
+    hourly_req_text = "N/A"
+    quota_text = "Unlimited (Telegram Cloud)"
     
-    try:
-        profile_res = await get_user_profile(api_key)
-        if profile_res.get("status") == "success":
-            data = profile_res.get("data", {})
-            tg_uid = data.get("user_id", "N/A")
-            quota = data.get("quota", "Unlimited")
-            rate = data.get("rate_limits", {})
-            d_rate = rate.get("per_day", {})
-            d_limit = d_rate.get("limit", 10000)
-            d_rem = d_rate.get("remaining", 10000)
-            d_used = max(0, d_limit - d_rem)
-            
-            profile_info = f"UID: <code>{clean_html(tg_uid)}</code> | Quota: <b>{clean_html(quota)}</b>"
-            daily_req_text = f"<b>{d_used:,} / {d_limit:,} used</b> ({d_rem:,} left)"
-    except Exception as e:
-        logger.warning(f"Failed to fetch profile: {e}")
+    if api_key:
+        try:
+            profile_res = await get_user_profile(api_key)
+            if profile_res.get("status") == "success":
+                data = profile_res.get("data", {})
+                tg_uid = data.get("user_id", str(user_id))
+                quota_text = data.get("quota", "Unlimited (Telegram Cloud)")
+                rate = data.get("rate_limits", {})
+                
+                d_rate = rate.get("per_day", {})
+                d_limit = d_rate.get("limit", 10000)
+                d_rem = d_rate.get("remaining", 10000)
+                d_used = max(0, d_limit - d_rem)
+                
+                h_rate = rate.get("per_hour", {})
+                h_limit = h_rate.get("limit", 1500)
+                h_rem = h_rate.get("remaining", 1500)
+                h_used = max(0, h_limit - h_rem)
+                
+                d_bar = make_progress_bar(d_used, d_limit, length=10)
+                daily_req_text = f"<b>{d_used:,} / {d_limit:,} used</b> ({d_rem:,} left)\n<code>{d_bar}</code>"
+                hourly_req_text = f"<code>{h_used:,} / {h_limit:,} used</code> ({h_rem:,} left)"
+                profile_info = f"UID: <code>{clean_html(tg_uid)}</code> | Status: <b>Active 🟢</b>"
+        except Exception as e:
+            logger.warning(f"Failed to fetch live profile: {e}")
 
     current_folder_id, current_folder_name = get_user_folder(user_id)
     target_display = f"📁 {clean_html(current_folder_name)} 🎯" if current_folder_id != "root" else "Telegram Cloud (Saved Messages)"
@@ -296,9 +310,11 @@ async def send_main_menu(event, user_id: int, first_name: str, edit: bool = Fals
     text = (
         f"🚀 <b>TG DRIVE CLOUD MANAGER</b>\n\n"
         f"{role_tag} {clean_html(first_name)} (<code>{user_id}</code>)\n"
-        f"⚡ <b>Status:</b> {profile_info}\n"
-        f"📊 <b>Daily API Requests:</b> {daily_req_text}\n"
-        f"🎯 <b>Target Folder:</b> {target_display}\n\n"
+        f"⚡ <b>Account:</b> {profile_info}\n"
+        f"♾️ <b>Storage Quota:</b> <code>{clean_html(quota_text)}</code>\n"
+        f"📊 <b>Live API Daily Quota:</b>\n{daily_req_text}\n"
+        f"⏱️ <b>Live API Hourly Quota:</b> {hourly_req_text}\n"
+        f"🎯 <b>Target Upload Folder:</b> {target_display}\n\n"
         f"<i>Use the buttons below to browse, search, upload, or manage files:</i>"
     )
 
@@ -532,9 +548,12 @@ async def media_upload_handler(event):
             final_size = data.get("size", file_size)
             dl_info = await get_file_download_info(api_key, file_id)
             dl_url = dl_info.get("download_url", "")
+            stream_url = dl_info.get("stream_url", "")
             validity = dl_info.get("validity_text", "24 Hours")
             expiry = dl_info.get("expiry_date", "N/A")
             dest = data.get("destination", "Saved Messages ('me')")
+
+            stream_block = f"▶️ <b>Direct Online Stream Link:</b>\n<code>{stream_url}</code>\n\n" if stream_url else ""
 
             text = (
                 f"🎉 <b>FILE STORED IN SAVED MESSAGES!</b>\n\n"
@@ -544,18 +563,23 @@ async def media_upload_handler(event):
                 f"📂 <b>Target Folder:</b> {folder_tag}\n"
                 f"☁️ <b>Destination:</b> <code>{clean_html(dest)}</code>\n\n"
                 f"🔗 <b>Direct Fast Download Link:</b>\n<code>{dl_url}</code>\n\n"
+                f"{stream_block}"
                 f"⏱️ <b>Link Validity:</b> <code>{validity}</code>\n"
                 f"⏳ <b>Expires:</b> <code>{expiry}</code>"
             )
 
-            buttons = [
-                [Button.url("⬇️ Direct Fast Download Link", dl_url)],
+            buttons = []
+            if dl_url:
+                buttons.append([Button.url("⬇️ Direct Fast Download Link", dl_url)])
+            if stream_url:
+                buttons.append([Button.url("▶️ Direct Online Stream Link", stream_url)])
+            buttons.extend([
                 [
                     Button.inline("⭐ Star File", f"file_star:{file_id}:{folder_id}:1".encode('utf-8')),
                     Button.inline("🗑️ Delete", f"file_del_confirm:{file_id}:{folder_id}:1".encode('utf-8'))
                 ],
                 [Button.inline("📁 View in Files", f"menu_files:{folder_id}:1".encode('utf-8'))]
-            ]
+            ])
             await status_msg.edit(text, buttons=buttons, parse_mode="html")
         else:
             err_msg = upload_res.get("message", "Upload failed")
@@ -787,7 +811,7 @@ async def text_handler(event):
                     dest=dest,
                     dl_info=dl_info
                 )
-                kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=folder_id, page=page)
+                kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, stream_url=dl_info.get("stream_url", ""), folder_id=folder_id, page=page)
                 await event.respond(text_card, buttons=kb, parse_mode="html")
             else:
                 await status_msg.edit(f"❌ Rename failed: {clean_html(res.get('message', 'Error'))}", buttons=back_to_main_kb(), parse_mode="html")
@@ -1014,13 +1038,17 @@ async def callback_handler(event):
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
         is_refresh = (len(parts) > 3 and parts[3] == "refresh")
 
-        # Check if we have cached items; if not or if user explicitly requested refresh, show loading screen
-        cached_items = file_cache.get(user_id)
-        if cached_items is None or is_refresh:
-            await event.answer("📁 Scanning TG Drive Cloud...")
-            await event.edit(build_loading_card("📁 Loading TG Drive Files", 50.0, "Scanning files from Telegram Cloud..."), parse_mode="html")
+        if is_refresh:
+            file_cache.invalidate(user_id)
+            await event.answer("🔄 Refreshing Files from Cloud...")
+            await event.edit(build_loading_card("📁 Refreshing TG Drive Files", 50.0, "Scanning fresh files from Telegram Cloud..."), parse_mode="html")
         else:
-            await event.answer("📁 Instant Load")
+            cached_items = file_cache.get(user_id)
+            if cached_items is None:
+                await event.answer("📁 Scanning TG Drive Cloud...")
+                await event.edit(build_loading_card("📁 Loading TG Drive Files", 50.0, "Scanning files from Telegram Cloud..."), parse_mode="html")
+            else:
+                await event.answer("📁 Loaded")
 
         try:
             all_items = await get_cached_or_fetch_files(api_key, user_id, force_refresh=is_refresh)
@@ -1126,7 +1154,7 @@ async def callback_handler(event):
                     dest=dest,
                     dl_info=dl_info
                 )
-                kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=folder_id, page=page)
+                kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, stream_url=dl_info.get("stream_url", ""), folder_id=folder_id, page=page)
                 await event.edit(text, buttons=kb, parse_mode="html")
             else:
                 await event.edit(f"❌ <b>File #{file_id} not found on TG Drive Cloud.</b>", buttons=back_to_main_kb(), parse_mode="html")
@@ -1149,8 +1177,10 @@ async def callback_handler(event):
             res = await get_file_info(api_key, file_id)
             if res.get("status") == "success":
                 file_data = res.get("data", res)
-                download_url = await build_download_url(file_id, api_key)
-                kb = file_details_kb(file_id, is_starred=star_val, download_url=download_url, folder_id=folder_id, page=page)
+                dl_info = await get_file_download_info(api_key, file_id)
+                download_url = dl_info.get("download_url", "")
+                stream_url = dl_info.get("stream_url", "")
+                kb = file_details_kb(file_id, is_starred=star_val, download_url=download_url, stream_url=stream_url, folder_id=folder_id, page=page)
                 await event.edit(buttons=kb)
         except Exception as e:
             await event.answer(f"Error: {str(e)}", alert=True)
@@ -1280,7 +1310,7 @@ async def callback_handler(event):
                 dl_info=dl_info,
                 folder_name=target_name
             )
-            kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=target_folder_id, page=page)
+            kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, stream_url=dl_info.get("stream_url", ""), folder_id=target_folder_id, page=page)
             await event.edit(text_card, buttons=kb, parse_mode="html")
         except Exception as e:
             await event.edit(f"❌ Error moving file: {clean_html(str(e))}", buttons=back_to_main_kb(), parse_mode="html")
