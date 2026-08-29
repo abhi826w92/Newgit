@@ -227,12 +227,14 @@ def answer_callback(callback_query_id, text=None, show_alert=False):
     except Exception:
         pass
 
-def send_tg_document(chat_id, filepath, caption=""):
+def send_tg_document(chat_id, filepath, caption="", reply_markup=None):
     url = f"{TG_BASE_URL}/sendDocument"
     try:
         with open(filepath, "rb") as f:
             files = {"document": f}
             data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+            if reply_markup:
+                data["reply_markup"] = json.dumps(reply_markup) if not isinstance(reply_markup, str) else reply_markup
             requests.post(url, data=data, files=files, timeout=30)
     except Exception as e:
         send_tg_message(chat_id, f"❌ Failed to send document: {e}")
@@ -2728,168 +2730,261 @@ def get_sqlite_table_summary(db_path):
         pass
     return ""
 
-def scan_all_database_and_storage_items():
-    """Recursively scans scripts/ and root WORKSPACE_DIR for all database files, sessions, vaults, and storage assets."""
-    storage_items = []
+def get_all_bot_entities():
+    """
+    Returns a dictionary of all bot/project entities in the workspace:
+    e.g. {'Ghidrabot vps': {...}, 'tgdriveapi-python (3)': {...}, 'xxtgdriveapibot': {...}}
+    """
+    bots = {}
+    if os.path.exists(SCRIPTS_DIR):
+        for item in sorted(os.listdir(SCRIPTS_DIR)):
+            if item.startswith(".") or item == "__pycache__":
+                continue
+            item_path = os.path.join(SCRIPTS_DIR, item)
+            if os.path.isdir(item_path):
+                bots[item] = {"name": item, "type": "folder", "path": item_path}
+            elif item.endswith(".py"):
+                bots[item] = {"name": item, "type": "script", "path": item_path}
+                
+    for s in config.get("active_scripts", []):
+        clean = s.replace("scripts/", "").lstrip("/").replace("\\", "/")
+        parts = clean.split("/")
+        proj = parts[0] if len(parts) > 1 else clean
+        if proj not in bots:
+            bots[proj] = {"name": proj, "type": "folder" if len(parts) > 1 else "script", "path": os.path.join(SCRIPTS_DIR, proj)}
+            
+    return bots
+
+
+def scan_database_items_for_bot(bot_key):
+    """
+    Scans only the database, session, and storage files belonging strictly to a specific bot/project.
+    """
+    items = []
     db_exts = {".db", ".sqlite", ".sqlite3", ".db-journal", ".db-wal", ".db-shm"}
     session_exts = {".session", ".session-journal", ".session-shm", ".session-wal"}
     
-    # 1. Scan scripts/
-    if os.path.exists(SCRIPTS_DIR):
-        for root, _, files in os.walk(SCRIPTS_DIR):
+    if bot_key == "ROOT":
+        if os.path.exists(WORKSPACE_DIR):
+            for f in os.listdir(WORKSPACE_DIR):
+                if f.startswith(".git") or f in [".venvs", "scripts", "__pycache__"]:
+                    continue
+                fp = os.path.join(WORKSPACE_DIR, f)
+                if os.path.isfile(fp):
+                    f_lower = f.lower()
+                    ext = os.path.splitext(f_lower)[1]
+                    cat = None
+                    if ext in db_exts:
+                        cat = "DATABASE"
+                    elif ext in session_exts:
+                        cat = "SESSION"
+                    elif f_lower.endswith(".json") and ("data" in f_lower or "db" in f_lower or "bot" in f_lower):
+                        cat = "DATABASE"
+                    if cat:
+                        try:
+                            sz = os.path.getsize(fp)
+                            items.append({
+                                "name": f,
+                                "path": fp,
+                                "rel_path": f,
+                                "size": sz,
+                                "human_size": format_bytes_human(sz),
+                                "category": cat,
+                                "mtime": os.path.getmtime(fp)
+                            })
+                        except Exception:
+                            pass
+        items.sort(key=lambda x: x["size"], reverse=True)
+        return items
+
+    bot_dir = os.path.join(SCRIPTS_DIR, bot_key)
+    bot_stem = bot_key.rsplit(".", 1)[0]
+    
+    if os.path.isdir(bot_dir):
+        for root, _, files in os.walk(bot_dir):
+            if "__pycache__" in root:
+                continue
             for f in files:
                 f_lower = f.lower()
                 fp = os.path.join(root, f)
                 rel = os.path.relpath(fp, WORKSPACE_DIR).replace("\\", "/")
                 ext = os.path.splitext(f_lower)[1]
-                
                 cat = None
                 if ext in db_exts:
                     cat = "DATABASE"
                 elif ext in session_exts:
                     cat = "SESSION"
-                elif f_lower.endswith(".env") or f_lower == ".env":
-                    cat = "ENV_SECRET"
-                elif f_lower.endswith(".log") or (f_lower.startswith("logs_") and f_lower.endswith(".md")):
+                elif f_lower.endswith(".json") and not f_lower.endswith((".env_vault.json", "package.json")):
+                    cat = "DATABASE"
+                elif f_lower.endswith(".log"):
                     cat = "LOG"
-                elif f_lower.startswith(".staging_") or f_lower.startswith("temp_"):
-                    cat = "TEMP_STAGING"
                     
                 if cat:
                     try:
                         sz = os.path.getsize(fp)
-                        mtime = os.path.getmtime(fp)
-                        storage_items.append({
+                        items.append({
                             "name": f,
                             "path": fp,
                             "rel_path": rel,
                             "size": sz,
                             "human_size": format_bytes_human(sz),
                             "category": cat,
-                            "mtime": mtime
+                            "mtime": os.path.getmtime(fp)
                         })
                     except Exception:
                         pass
-
-    # 2. Scan root WORKSPACE_DIR (excluding .git and .venvs)
-    if os.path.exists(WORKSPACE_DIR):
-        for f in os.listdir(WORKSPACE_DIR):
-            if f.startswith(".git") or f == ".venvs" or f == "scripts":
-                continue
-            fp = os.path.join(WORKSPACE_DIR, f)
-            if os.path.isfile(fp):
-                f_lower = f.lower()
-                rel = f
-                ext = os.path.splitext(f_lower)[1]
-                cat = None
-                if ext in db_exts:
-                    cat = "DATABASE"
-                elif ext in session_exts:
-                    cat = "SESSION"
-                elif f_lower in [".env_vault.json", ".env"] or f_lower.endswith(".env"):
-                    cat = "ENV_SECRET"
-                elif f_lower.endswith(".log") or (f_lower.startswith("logs_") and f_lower.endswith(".md")):
-                    cat = "LOG"
-                elif f_lower.startswith(".staging_") or f_lower.startswith("temp_"):
-                    cat = "TEMP_STAGING"
-                
-                if cat:
-                    try:
-                        sz = os.path.getsize(fp)
-                        mtime = os.path.getmtime(fp)
-                        storage_items.append({
-                            "name": f,
-                            "path": fp,
-                            "rel_path": rel,
-                            "size": sz,
-                            "human_size": format_bytes_human(sz),
-                            "category": cat,
-                            "mtime": mtime
-                        })
-                    except Exception:
-                        pass
-
-    storage_items.sort(key=lambda x: x["size"], reverse=True)
-    return storage_items
-
-def show_database_inspector_view(chat_id, message_id=None):
-    storage_items = scan_all_database_and_storage_items()
-    total_bytes = sum(x["size"] for x in storage_items)
-    
-    db_items = [x for x in storage_items if x["category"] == "DATABASE"]
-    session_items = [x for x in storage_items if x["category"] == "SESSION"]
-    env_items = [x for x in storage_items if x["category"] == "ENV_SECRET"]
-    temp_items = [x for x in storage_items if x["category"] in ["LOG", "TEMP_STAGING"]]
-    
-    total_human = format_bytes_human(total_bytes)
-    
-    lines = [
-        "🗄️ <b>Database & Storage Inspector</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📦 <b>Total Storage Footprint:</b> <code>{total_human}</code> ({len(storage_items)} items)",
-        f"📊 <b>Telemetry:</b> 🗄️ {len(db_items)} DBs | 🔑 {len(session_items)} Sessions | 🔒 {len(env_items)} Secrets | 📄 {len(temp_items)} Temp/Logs\n"
-    ]
-    
-    if not storage_items:
-        lines.append("<i>✨ All databases, sessions, and storage files are 100% clean and empty!</i>")
     else:
-        if db_items:
-            lines.append("🗄️ <b>Database Files (.db / .sqlite):</b>")
-            for item in db_items[:10]:
-                table_info = get_sqlite_table_summary(item["path"])
-                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>){table_info}")
-            lines.append("")
-            
-        if session_items:
-            lines.append("🔑 <b>Telegram Sessions (.session):</b>")
-            for item in session_items[:10]:
-                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>)")
-            lines.append("")
-            
-        if env_items:
-            lines.append("🔒 <b>Environments & Vaults (.env / .json):</b>")
-            for item in env_items[:6]:
-                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>)")
-            lines.append("")
-            
-        if temp_items:
-            lines.append("📄 <b>Temporary Staging & Logs:</b>")
-            for item in temp_items[:6]:
-                lines.append(f"• <code>{item['rel_path']}</code> (<code>{item['human_size']}</code>)")
-            lines.append("")
+        if os.path.exists(SCRIPTS_DIR):
+            for f in os.listdir(SCRIPTS_DIR):
+                f_lower = f.lower()
+                fp = os.path.join(SCRIPTS_DIR, f)
+                if os.path.isfile(fp):
+                    rel = os.path.relpath(fp, WORKSPACE_DIR).replace("\\", "/")
+                    ext = os.path.splitext(f_lower)[1]
+                    matches_bot = f_lower.startswith(bot_stem.lower())
+                    if matches_bot:
+                        cat = None
+                        if ext in db_exts:
+                            cat = "DATABASE"
+                        elif ext in session_exts:
+                            cat = "SESSION"
+                        elif f_lower.endswith(".json"):
+                            cat = "DATABASE"
+                        if cat:
+                            try:
+                                sz = os.path.getsize(fp)
+                                items.append({
+                                    "name": f,
+                                    "path": fp,
+                                    "rel_path": rel,
+                                    "size": sz,
+                                    "human_size": format_bytes_human(sz),
+                                    "category": cat,
+                                    "mtime": os.path.getmtime(fp)
+                                })
+                            except Exception:
+                                pass
 
-    lines.append("<i>Tap an item below to Download or Delete, or use bulk wipe buttons:</i>")
-    text = "\n".join(lines)
+    items.sort(key=lambda x: x["size"], reverse=True)
+    return items
+
+
+def show_database_bot_selection_view(chat_id, message_id=None):
+    """
+    Level 1: Displays the Bot Selection Hub.
+    Running and installed bots are shown separately with their isolated database count.
+    """
+    bots = get_all_bot_entities()
+    active_now = get_active_running_processes()
+    
+    bot_stats = []
+    for bot_name, binfo in bots.items():
+        db_items = scan_database_items_for_bot(bot_name)
+        total_sz = sum(x["size"] for x in db_items)
+        is_running = any(k.startswith(f"{bot_name}/") or k == bot_name or os.path.dirname(k) == bot_name for k in active_now.keys())
+        bot_stats.append({
+            "name": bot_name,
+            "type": binfo["type"],
+            "items_count": len(db_items),
+            "total_size": total_sz,
+            "human_size": format_bytes_human(total_sz),
+            "is_running": is_running
+        })
+        
+    root_dbs = scan_database_items_for_bot("ROOT")
+    
+    text = (
+        "🗄️ <b>Database & Storage Inspector</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Select a Bot / Project below to view, download, or manage its isolated database files:</i>\n\n"
+    )
     
     buttons = []
-    for item in storage_items[:15]:
-        rel = item["rel_path"]
-        name_trunc = item["name"] if len(item["name"]) <= 20 else item["name"][:17] + "..."
-        btn_dl = {"text": f"📥 {name_trunc} ({item['human_size']})", "callback_data": f"db_dl_{rel}"}
-        btn_del = {"text": "🗑️ Delete", "callback_data": f"db_del_one_{rel}"}
-        buttons.append([btn_dl, btn_del])
-        
-    bulk_row = []
-    if db_items:
-        bulk_row.append({"text": "🗄️ Wipe All DBs", "callback_data": "db_wipe_all_dbs_prompt"})
-    if session_items:
-        bulk_row.append({"text": "🔑 Wipe All Sessions", "callback_data": "db_wipe_all_sessions_prompt"})
-    if bulk_row:
-        buttons.append(bulk_row)
-        
-    if storage_items:
-        buttons.append([{"text": "💣 NUKE & WIPE ALL DATABASES & STORAGE", "callback_data": "db_nuke_all_prompt"}])
-        
+    if not bot_stats and not root_dbs:
+        text += "✨ <i>No bots or databases found in workspace.</i>\n"
+    else:
+        for b in bot_stats:
+            status_icon = "🟢" if b["is_running"] else "⚪"
+            db_badge = f"{b['items_count']} DBs • {b['human_size']}" if b["items_count"] > 0 else "Clean (0 DBs)"
+            text += f"• {status_icon} <b>{b['name']}</b> ({db_badge})\n"
+            
+            btn_text = f"{status_icon} {b['name']} ({db_badge})"
+            buttons.append([{"text": btn_text, "callback_data": f"db_bot_{b['name']}"}])
+            
+        if root_dbs:
+            root_sz = format_bytes_human(sum(x["size"] for x in root_dbs))
+            text += f"• 🌐 <b>Root Workspace</b> ({len(root_dbs)} DBs • {root_sz})\n"
+            buttons.append([{"text": f"🌐 Root Workspace DBs ({len(root_dbs)} Files)", "callback_data": "db_bot_ROOT"}])
+
+    text += "\n━━━━━━━━━━━━━━━━━━━━━━\n💡 <i>Each bot's databases and sessions are displayed separately.</i>"
+
     buttons.append([
-        {"text": "🔄 Rescan / Refresh", "callback_data": "menu_db_inspector"},
+        {"text": "🔄 Refresh", "callback_data": "menu_db_inspector"},
         {"text": "🔙 Main Menu", "callback_data": "menu_main"}
     ])
     
-    markup = {"inline_keyboard": buttons[:85]}
+    markup = {"inline_keyboard": buttons}
     if message_id:
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
     else:
         send_tg_message(chat_id, text, reply_markup=markup)
+
+
+def show_bot_database_view(chat_id, bot_key, message_id=None):
+    """
+    Level 2: Displays the isolated database files belonging strictly to `bot_key`.
+    Provides direct download file and single delete buttons.
+    """
+    db_items = scan_database_items_for_bot(bot_key)
+    display_title = "Root Workspace" if bot_key == "ROOT" else bot_key
+    total_sz = sum(x["size"] for x in db_items)
+    
+    lines = [
+        f"🗄️ <b>Database Inspector:</b> <code>{display_title}</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📦 <b>Total Bot Storage:</b> <code>{format_bytes_human(total_sz)}</code> ({len(db_items)} files)",
+        ""
+    ]
+    
+    if not db_items:
+        lines.append("✨ <i>No database or session files found for this bot!</i>")
+    else:
+        lines.append("<b>Database & Storage Files:</b>")
+        for item in db_items:
+            table_info = get_sqlite_table_summary(item["path"]) if item["name"].endswith((".db", ".sqlite", ".sqlite3")) else ""
+            lines.append(f"• <code>{item['name']}</code> (<code>{item['human_size']}</code>){table_info}")
+        lines.append("")
+        lines.append("<i>Tap an item to Download file or Delete it:</i>")
+
+    text = "\n".join(lines)
+    
+    buttons = []
+    for item in db_items:
+        rel = item["rel_path"]
+        f_name = item["name"]
+        name_trunc = f_name if len(f_name) <= 18 else f_name[:15] + "..."
+        btn_dl = {"text": f"📥 {name_trunc} ({item['human_size']})", "callback_data": f"db_dl_{rel}"}
+        btn_del = {"text": "🗑️ Delete", "callback_data": f"db_del_one_{rel}"}
+        buttons.append([btn_dl, btn_del])
+        
+    if db_items:
+        buttons.append([{"text": f"💣 Wipe All Databases of {display_title}", "callback_data": f"db_wipe_bot_prompt_{bot_key}"}])
+        
+    buttons.append([
+        {"text": "🔄 Refresh", "callback_data": f"db_bot_{bot_key}"},
+        {"text": "🔙 Back to All Bots", "callback_data": "menu_db_inspector"}
+    ])
+    
+    markup = {"inline_keyboard": buttons}
+    if message_id:
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+    else:
+        send_tg_message(chat_id, text, reply_markup=markup)
+
+
+def show_database_inspector_view(chat_id, message_id=None):
+    """Fallback / compatibility handler that routes directly to the bot selection hub."""
+    show_database_bot_selection_view(chat_id, message_id)
 
 # ---------------------------------------------------------------------------
 # Callback Query Handler (Button Clicks)
@@ -3079,26 +3174,87 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         }
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
 
-    # 2i. Database & Storage Inspector Menu
+    # 2i. Database & Storage Inspector: Main Bot Selection Hub
     elif data == "menu_db_inspector":
-        answer_callback(callback_id, "Scanning databases & storage...")
-        show_database_inspector_view(chat_id, message_id)
+        answer_callback(callback_id, "Scanning databases by bot...")
+        show_database_bot_selection_view(chat_id, message_id)
 
-    # 2j. Download specific DB / Session / Storage file
+    # 2i2. Specific Bot Database View
+    elif data.startswith("db_bot_"):
+        bot_key = data.replace("db_bot_", "")
+        answer_callback(callback_id)
+        show_bot_database_view(chat_id, bot_key, message_id)
+
+    # 2j. Download specific DB / Session / Storage file with inline delete button
     elif data.startswith("db_dl_"):
         rel_target = data.replace("db_dl_", "")
         full_target = os.path.join(WORKSPACE_DIR, rel_target)
+        
+        # Identify bot_key
+        clean_rel = rel_target.replace("scripts/", "").lstrip("/")
+        parts = clean_rel.split("/")
+        bot_key = parts[0] if len(parts) > 1 else ("ROOT" if not rel_target.startswith("scripts/") else clean_rel)
+        
         if os.path.exists(full_target):
-            answer_callback(callback_id, f"Sending {os.path.basename(rel_target)}...")
-            send_tg_document(chat_id, full_target, caption=f"🗄️ <b>Storage File:</b> <code>{rel_target}</code> ({format_bytes_human(os.path.getsize(full_target))})")
+            fname = os.path.basename(rel_target)
+            sz_human = format_bytes_human(os.path.getsize(full_target))
+            answer_callback(callback_id, f"Sending {fname}...")
+            
+            doc_markup = {
+                "inline_keyboard": [
+                    [{"text": f"🗑️ Delete {fname}", "callback_data": f"db_del_from_doc_{rel_target}"}],
+                    [{"text": "🔙 Back to Bot Databases", "callback_data": f"db_bot_{bot_key}"}]
+                ]
+            }
+            send_tg_document(
+                chat_id, 
+                full_target, 
+                caption=f"🗄️ <b>Storage File:</b> <code>{fname}</code>\n📁 <b>Path:</b> <code>{rel_target}</code>\n📦 <b>Size:</b> <code>{sz_human}</code>",
+                reply_markup=doc_markup
+            )
         else:
             answer_callback(callback_id, "File not found or already deleted!", show_alert=True)
 
-    # 2k. Delete single specific DB / Session / Storage file
+    # 2j2. Delete directly from document message
+    elif data.startswith("db_del_from_doc_"):
+        rel_target = data.replace("db_del_from_doc_", "")
+        full_target = os.path.join(WORKSPACE_DIR, rel_target)
+        fname = os.path.basename(rel_target)
+        
+        answer_callback(callback_id, f"Deleting {fname}...")
+        if os.path.exists(full_target):
+            try:
+                os.remove(full_target)
+            except Exception:
+                pass
+                
+        stem = os.path.splitext(full_target)[0]
+        for extra_ext in [".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"]:
+            c_path = stem + extra_ext
+            if os.path.exists(c_path):
+                try:
+                    os.remove(c_path)
+                except Exception:
+                    pass
+                    
+        try:
+            subprocess.run(["git", "rm", "-f", "--ignore-unmatch", rel_target, f"{rel_target}*"], cwd=WORKSPACE_DIR, capture_output=True)
+        except Exception:
+            pass
+            
+        threading.Thread(target=git_sync_to_github, args=(f"Permanently delete {rel_target}",), daemon=True).start()
+        edit_tg_message(chat_id, message_id, f"🗑️ <b>Deleted:</b> <code>{rel_target}</code> has been permanently removed from disk and Git.", reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Databases", "callback_data": "menu_db_inspector"}]]})
+
+    # 2k. Delete single specific DB / Session file from Bot View
     elif data.startswith("db_del_one_"):
         rel_target = data.replace("db_del_one_", "")
         full_target = os.path.join(WORKSPACE_DIR, rel_target)
         fname = os.path.basename(rel_target)
+        
+        # Identify bot_key to return to
+        clean_rel = rel_target.replace("scripts/", "").lstrip("/")
+        parts = clean_rel.split("/")
+        bot_key = parts[0] if len(parts) > 1 else ("ROOT" if not rel_target.startswith("scripts/") else clean_rel)
         
         answer_callback(callback_id, f"Deleting {fname}...")
         
@@ -3132,9 +3288,63 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         threading.Thread(target=git_sync_to_github, args=(f"Permanently delete storage file {rel_target}",), daemon=True).start()
         
         answer_callback(callback_id, f"🗑️ {fname} permanently deleted!", show_alert=True)
-        show_database_inspector_view(chat_id, message_id)
+        show_bot_database_view(chat_id, bot_key, message_id)
 
-    # 2l. Wipe All Databases Prompt
+    # 2k2. Wipe All Databases of Specific Bot Prompt
+    elif data.startswith("db_wipe_bot_prompt_"):
+        bot_key = data.replace("db_wipe_bot_prompt_", "")
+        display_title = "Root Workspace" if bot_key == "ROOT" else bot_key
+        answer_callback(callback_id)
+        text = (
+            f"💣 <b>Confirm Wipe All Databases for:</b> <code>{display_title}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>WARNING:</b> This will permanently delete <b>ALL databases and sessions</b> belonging to <code>{display_title}</code>!\n\n"
+            "Are you sure you want to proceed?"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": f"💣 Yes, Delete All DBs for {display_title}", "callback_data": f"do_db_wipe_bot_{bot_key}"}],
+                [{"text": "❌ Cancel", "callback_data": f"db_bot_{bot_key}"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 2k3. Execute Wipe All Databases of Specific Bot
+    elif data.startswith("do_db_wipe_bot_"):
+        bot_key = data.replace("do_db_wipe_bot_", "")
+        display_title = "Root Workspace" if bot_key == "ROOT" else bot_key
+        answer_callback(callback_id, f"Deleting databases of {display_title}...")
+        
+        db_items = scan_database_items_for_bot(bot_key)
+        deleted_count = 0
+        
+        for item in db_items:
+            fp = item["path"]
+            rel = item["rel_path"]
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                    deleted_count += 1
+                except Exception:
+                    pass
+            stem = os.path.splitext(fp)[0]
+            for extra_ext in [".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"]:
+                c_path = stem + extra_ext
+                if os.path.exists(c_path):
+                    try:
+                        os.remove(c_path)
+                    except Exception:
+                        pass
+            try:
+                subprocess.run(["git", "rm", "-f", "--ignore-unmatch", rel, f"{rel}*"], cwd=WORKSPACE_DIR, capture_output=True)
+            except Exception:
+                pass
+                
+        threading.Thread(target=git_sync_to_github, args=(f"Wipe all databases for {display_title}",), daemon=True).start()
+        answer_callback(callback_id, f"✅ Deleted {deleted_count} databases for {display_title}!", show_alert=True)
+        show_bot_database_view(chat_id, bot_key, message_id)
+
+    # 2l. Wipe All Databases Prompt (Global)
     elif data == "db_wipe_all_dbs_prompt":
         answer_callback(callback_id)
         text = (
@@ -3177,7 +3387,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             
         threading.Thread(target=git_sync_to_github, args=("Wipe all SQLite database files via Telegram",), daemon=True).start()
         answer_callback(callback_id, f"✅ Deleted {deleted_count} database files!", show_alert=True)
-        show_database_inspector_view(chat_id, message_id)
+        show_database_bot_selection_view(chat_id, message_id)
 
     # 2n. Wipe All Sessions Prompt
     elif data == "db_wipe_all_sessions_prompt":
