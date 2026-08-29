@@ -298,8 +298,13 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
                 logger.info(f"Auto-sync to cloud complete: {commit_message}")
                 return True, "Cloud sync complete! All changes backed up."
             else:
-                # Rebase with -X ours so local deletions/updates strictly take precedence
-                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
+                # Rebase with -X theirs so local deletions/updates strictly take precedence over remote!
+                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "theirs", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
+                # Re-stage all local changes and deletions
+                subprocess.run(["git", "add", "-A"], cwd=WORKSPACE_DIR, capture_output=True)
+                status2 = subprocess.run(["git", "status", "--porcelain"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+                if status2.stdout.strip():
+                    subprocess.run(["git", "commit", "-m", f"{commit_message} (reconciled)"], cwd=WORKSPACE_DIR, capture_output=True)
                 push_res = subprocess.run(["git", "push", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
                 if push_res.returncode == 0:
                     logger.info(f"Auto-sync to cloud complete after rebase: {commit_message}")
@@ -3354,25 +3359,42 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
     elif data.startswith("inst_replace_"):
         fname = data.replace("inst_replace_", "")
+        clean_fname = fname.replace("scripts/", "").lstrip("/")
+        base_stem = clean_fname.rsplit(".", 1)[0]
+        
         state = user_states.get(user_id, {})
         staged_path = state.get("staging_path")
         if not staged_path or not os.path.exists(staged_path):
             answer_callback(callback_id, "Staged file expired. Please upload again.", show_alert=True)
             return
         
-        target_path = os.path.join(SCRIPTS_DIR, fname)
-        answer_callback(callback_id, f"Replacing and restarting {fname}...")
+        target_path = os.path.join(SCRIPTS_DIR, clean_fname)
+        answer_callback(callback_id, f"Replacing and restarting {clean_fname}...")
         
-        stop_child_app(script_name=fname, clear_active=False)
-        time.sleep(1.0)
+        # 1. Stop old process & release file locks
+        stop_child_app(script_name=clean_fname, clear_active=False)
+        time.sleep(0.5)
         
+        # 2. Clean old associated databases and sessions so old data is not mixed
+        for extra_ext in [".db", ".db-wal", ".db-shm", ".db-journal", ".session", ".session-journal", ".session-wal", ".session-shm"]:
+            f_db = os.path.join(SCRIPTS_DIR, base_stem + extra_ext)
+            if os.path.exists(f_db):
+                try:
+                    os.remove(f_db)
+                    subprocess.run(["git", "rm", "-f", "--ignore-unmatch", f"scripts/{base_stem}{extra_ext}"], cwd=WORKSPACE_DIR, capture_output=True)
+                except Exception:
+                    pass
+        
+        # 3. Move fresh script into place
         import shutil
         shutil.move(staged_path, target_path)
         user_states.pop(user_id, None)
-        git_sync_to_github(f"Update and replace: {fname}")
         
-        ok, msg = start_child_app(fname)
-        send_tg_message(chat_id, f"🔄 <b>Updated & Restarted Instance:</b> <code>{fname}</code>\n\n{msg}", reply_markup=get_main_menu_keyboard())
+        # 4. Sync updated code to GitHub
+        git_sync_to_github(f"Update and replace script: {clean_fname}")
+        
+        ok, msg = start_child_app(clean_fname, force_restart=True)
+        send_tg_message(chat_id, f"🔄 <b>Updated & Restarted Instance:</b> <code>{clean_fname}</code>\n\n{msg}", reply_markup=get_main_menu_keyboard())
 
     elif data.startswith("inst_custom_"):
         fname = data.replace("inst_custom_", "")
@@ -3513,7 +3535,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         
         edit_tg_message(chat_id, message_id, success_msg, reply_markup={"inline_keyboard": buttons})
 
-    # 4e. Duplicate ZIP Project: 2. Update the Old
+    # 4e. Duplicate ZIP Project: 2. Update the Old (Complete Clean Replacement)
     elif data.startswith("zip_update_"):
         state = user_states.get(user_id, {})
         staged_path = state.get("staging_path")
@@ -3524,14 +3546,14 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             answer_callback(callback_id, "Staged file expired. Please upload again.", show_alert=True)
             return
             
-        answer_callback(callback_id, f"Updating and replacing {zip_base}...")
+        answer_callback(callback_id, f"Wiping old {zip_base} and deploying fresh...")
         user_states.pop(user_id, None)
         
         # 1. Stop old running processes & release file locks
         stop_child_app(script_name=zip_base, clear_active=True)
         time.sleep(0.5)
         
-        # 2. Properly delete old files from disk and Git
+        # 2. Completely delete old files, old databases, and companion sessions from disk and Git
         old_target_dir = os.path.join(SCRIPTS_DIR, zip_base)
         try:
             subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{zip_base}", zip_base], cwd=WORKSPACE_DIR, capture_output=True)
@@ -3545,8 +3567,20 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         if os.path.exists(old_venv):
             import shutil
             shutil.rmtree(old_venv, ignore_errors=True)
+
+        # 3. Purge previous vault entries for this project so old .env variables are NOT retained
+        vault = load_env_vault()
+        keys_to_purge = [
+            k for k in list(vault.keys())
+            if k == zip_base or k.startswith(f"{zip_base}/") or os.path.dirname(k) == zip_base or os.path.basename(k) == zip_base
+        ]
+        for k in keys_to_purge:
+            vault.pop(k, None)
+        save_env_vault(vault)
+        config["env_vault"] = vault
+        save_config(config)
             
-        # 3. Extract fresh new project code
+        # 4. Extract fresh new project code
         import zipfile
         os.makedirs(old_target_dir, exist_ok=True)
         extracted_files = []
@@ -3607,9 +3641,8 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
                 if parsed:
-                    curr_env = read_script_env(entry_script)
-                    curr_env.update(parsed)
-                    write_script_env(entry_script, curr_env)
+                    # Save ONLY fresh new variables to vault (no old variable retention)
+                    write_script_env(entry_script, parsed)
                     env_count += len(parsed)
                 try:
                     os.remove(ef)
@@ -3631,7 +3664,8 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             f"🎯 <b>Detected Entry Script:</b> <code>{entry_script or 'None'}</code>\n"
             f"{launch_status}\n"
             f"📦 <b>Dependencies:</b> {'Installed packages' if found_reqs else 'None'}\n"
-            f"🔒 <b>Environment:</b> {str(env_count) + ' variables loaded' if env_count else 'None'}\n"
+            f"🔒 <b>Environment:</b> {str(env_count) + ' fresh variables loaded' if env_count else 'Clean (No .env)'}\n"
+            f"🗑️ <b>Cleanup:</b> <i>Old code, stale .env, and old databases permanently wiped!</i>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "<i>Manage your updated project using the buttons below:</i>"
         )
@@ -4004,7 +4038,12 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
         # 8. Clean up config active_scripts and vault
         active_list = list(get_active_running_processes().keys())
-        config["active_scripts"] = active_list
+        config["active_scripts"] = [
+            s for s in active_list 
+            if s != clean_fname and s != fname and not (project_folder_name and (s == project_folder_name or s.startswith(f"{project_folder_name}/") or os.path.dirname(s) == project_folder_name))
+        ]
+        if config.get("active_script") in [clean_fname, fname] or (project_folder_name and (config.get("active_script") == project_folder_name or str(config.get("active_script", "")).startswith(f"{project_folder_name}/"))):
+            config["active_script"] = None
 
         vault = load_env_vault()
         keys_to_del = [
@@ -4019,6 +4058,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         for k in keys_to_del:
             vault.pop(k, None)
         save_env_vault(vault)
+        config["env_vault"] = vault
         save_config(config)
 
         # 9. Single thread-safe background sync to permanently push deletion to GitHub repo!
