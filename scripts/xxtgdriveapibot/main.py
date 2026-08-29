@@ -81,7 +81,10 @@ from api_client import (
     categorize_file,
     rename_file,
     move_file,
-    rename_folder
+    rename_folder,
+    generate_share_link,
+    get_file_download_link,
+    get_file_download_info
 )
 from keyboards import (
     api_key_request_kb,
@@ -145,9 +148,9 @@ client = TelegramClient(StringSession(_db_session_str), API_ID, API_HASH)
 
 PER_PAGE = 6
 
-# In-Memory Cache for ultra-fast browsing (TTL = 45s)
+# In-Memory Cache for ultra-fast browsing (TTL = 180s / 3 minutes)
 class UserFileCache:
-    def __init__(self, ttl_seconds: int = 45):
+    def __init__(self, ttl_seconds: int = 180):
         self.cache = {}
         self.ttl = ttl_seconds
 
@@ -164,7 +167,7 @@ class UserFileCache:
     def invalidate(self, user_id: int):
         self.cache.pop(user_id, None)
 
-file_cache = UserFileCache(ttl_seconds=45)
+file_cache = UserFileCache(ttl_seconds=180)
 
 async def get_cached_or_fetch_files(api_key: str, user_id: int, force_refresh: bool = False):
     """Retrieve files from memory cache or fetch fresh with live scanning."""
@@ -201,12 +204,46 @@ async def get_live_folder_info(api_key: str, user_id: int, folder_id: str):
     
     return get_folder_by_id(user_id, folder_id)
 
-def build_download_url(file_id: str, api_key: str = None) -> str:
-    """Build high-speed direct download link with API key parameter for browser/downloader compatibility."""
-    url = f"{API_BASE_URL}/v1/files/{file_id}/download"
-    if api_key:
-        return f"{url}?api_key={api_key}"
-    return url
+async def build_download_url(file_id: str, api_key: str = None) -> str:
+    """Build high-speed signed direct download link with token, exp, and u parameters from TG Drive API."""
+    if not file_id:
+        return ""
+    if not api_key:
+        return f"{API_BASE_URL}/v1/files/{file_id}/download"
+    return await get_file_download_link(api_key, file_id)
+
+def format_file_card_text(
+    name: str,
+    size: int,
+    mime: str,
+    file_id: str,
+    created_at: int,
+    dest: str,
+    dl_info: dict,
+    folder_name: str = None
+) -> str:
+    """Format full file metadata card with direct download link, validity, and expiration."""
+    icon = get_mime_icon(mime, name)
+    dl_url = dl_info.get("download_url", "")
+    validity = dl_info.get("validity_text", "24 Hours")
+    expiry = dl_info.get("expiry_date", "N/A")
+
+    folder_line = f"📂 <b>Folder:</b> 📁 <code>{clean_html(folder_name)}</code>\n" if folder_name and folder_name != "root" else ""
+
+    return (
+        f"{icon} <b>FILE DETAILS</b>\n\n"
+        f"🏷️ <b>Name:</b> <code>{clean_html(name)}</code>\n"
+        f"📦 <b>Size:</b> <code>{format_bytes(size)}</code>\n"
+        f"📑 <b>MIME Type:</b> <code>{clean_html(mime)}</code>\n"
+        f"🆔 <b>Message ID:</b> <code>#{file_id}</code>\n"
+        f"{folder_line}"
+        f"📅 <b>Uploaded:</b> {format_date(created_at)}\n"
+        f"📍 <b>Storage:</b> {clean_html(dest)}\n\n"
+        f"🔗 <b>Direct Fast Download Link:</b>\n<code>{dl_url}</code>\n\n"
+        f"⏱️ <b>Link Validity:</b> <code>{validity}</code>\n"
+        f"⏳ <b>Expires:</b> <code>{expiry}</code>"
+    )
+
 
 def is_admin(user_id: int) -> bool:
     """Check if the user is an authorized administrator."""
@@ -493,7 +530,10 @@ async def media_upload_handler(event):
 
             final_name = data.get("name", file_name)
             final_size = data.get("size", file_size)
-            dl_url = build_download_url(file_id, api_key)
+            dl_info = await get_file_download_info(api_key, file_id)
+            dl_url = dl_info.get("download_url", "")
+            validity = dl_info.get("validity_text", "24 Hours")
+            expiry = dl_info.get("expiry_date", "N/A")
             dest = data.get("destination", "Saved Messages ('me')")
 
             text = (
@@ -503,7 +543,9 @@ async def media_upload_handler(event):
                 f"🆔 <b>File ID:</b> <code>#{file_id}</code>\n"
                 f"📂 <b>Target Folder:</b> {folder_tag}\n"
                 f"☁️ <b>Destination:</b> <code>{clean_html(dest)}</code>\n\n"
-                f"🔗 <b>Direct Link:</b>\n<code>{dl_url}</code>"
+                f"🔗 <b>Direct Fast Download Link:</b>\n<code>{dl_url}</code>\n\n"
+                f"⏱️ <b>Link Validity:</b> <code>{validity}</code>\n"
+                f"⏳ <b>Expires:</b> <code>{expiry}</code>"
             )
 
             buttons = [
@@ -732,18 +774,18 @@ async def text_handler(event):
                 size = f_data.get("size", 0)
                 mime = f_data.get("mimeType", "N/A")
                 created_at = f_data.get("created_at")
-                download_url = build_download_url(file_id, api_key)
+                dl_info = await get_file_download_info(api_key, file_id)
+                download_url = dl_info.get("download_url", "")
                 is_starred = f_data.get("starred", False)
                 dest = f_data.get("destination", "Telegram Cloud ('Saved Messages')")
-                icon = get_mime_icon(mime, new_name)
-                text_card = (
-                    f"{icon} <b>FILE DETAILS</b>\n\n"
-                    f"🏷️ <b>Name:</b> <code>{clean_html(new_name)}</code>\n"
-                    f"📦 <b>Size:</b> <code>{format_bytes(size)}</code>\n"
-                    f"📑 <b>MIME Type:</b> <code>{clean_html(mime)}</code>\n"
-                    f"🆔 <b>Message ID:</b> <code>#{file_id}</code>\n"
-                    f"📅 <b>Uploaded:</b> {format_date(created_at)}\n"
-                    f"📍 <b>Storage:</b> {clean_html(dest)}\n"
+                text_card = format_file_card_text(
+                    name=new_name,
+                    size=size,
+                    mime=mime,
+                    file_id=file_id,
+                    created_at=created_at,
+                    dest=dest,
+                    dl_info=dl_info
                 )
                 kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=folder_id, page=page)
                 await event.respond(text_card, buttons=kb, parse_mode="html")
@@ -967,18 +1009,21 @@ async def callback_handler(event):
 
     # Files Menu (with instant loading & fast cache)
     if data.startswith("menu_files:"):
-        await event.answer("📁 Loading Files...")
         parts = data.split(":")
         folder_id = parts[1] if len(parts) > 1 else "all"
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+        is_refresh = (len(parts) > 3 and parts[3] == "refresh")
 
-        # Check if we have cached items; if not, show visual loading bar immediately
+        # Check if we have cached items; if not or if user explicitly requested refresh, show loading screen
         cached_items = file_cache.get(user_id)
-        if cached_items is None:
-            await event.edit(build_loading_card("📁 Loading TG Drive Files", 50.0, "Fetching 475+ files from Telegram Cloud..."), parse_mode="html")
+        if cached_items is None or is_refresh:
+            await event.answer("📁 Scanning TG Drive Cloud...")
+            await event.edit(build_loading_card("📁 Loading TG Drive Files", 50.0, "Scanning files from Telegram Cloud..."), parse_mode="html")
+        else:
+            await event.answer("📁 Instant Load")
 
         try:
-            all_items = await get_cached_or_fetch_files(api_key, user_id, force_refresh=True)
+            all_items = await get_cached_or_fetch_files(api_key, user_id, force_refresh=is_refresh)
             
             # Filter files by folder
             folder_title = "All Files"
@@ -1067,20 +1112,19 @@ async def callback_handler(event):
                 size = file_data.get("size", 0)
                 mime = file_data.get("mimeType") or file_data.get("mime_type") or "application/octet-stream"
                 created_at = file_data.get("created_at") or file_data.get("date")
-                download_url = build_download_url(file_id, api_key)
+                dl_info = await get_file_download_info(api_key, file_id)
+                download_url = dl_info.get("download_url", "")
                 is_starred = file_data.get("starred", False)
                 dest = file_data.get("destination", "Telegram Cloud ('Saved Messages')")
-                icon = get_mime_icon(mime, name)
 
-                text = (
-                    f"{icon} <b>FILE DETAILS</b>\n\n"
-                    f"🏷️ <b>Name:</b> <code>{clean_html(name)}</code>\n"
-                    f"📦 <b>Size:</b> <code>{format_bytes(size)}</code>\n"
-                    f"📑 <b>MIME Type:</b> <code>{clean_html(mime)}</code>\n"
-                    f"🆔 <b>Message ID:</b> <code>#{file_id}</code>\n"
-                    f"📅 <b>Uploaded:</b> {format_date(created_at)}\n"
-                    f"📍 <b>Storage:</b> {clean_html(dest)}\n\n"
-                    f"🔗 <b>Direct Fast Download Link:</b>\n<code>{download_url}</code>"
+                text = format_file_card_text(
+                    name=name,
+                    size=size,
+                    mime=mime,
+                    file_id=file_id,
+                    created_at=created_at,
+                    dest=dest,
+                    dl_info=dl_info
                 )
                 kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=folder_id, page=page)
                 await event.edit(text, buttons=kb, parse_mode="html")
@@ -1105,7 +1149,7 @@ async def callback_handler(event):
             res = await get_file_info(api_key, file_id)
             if res.get("status") == "success":
                 file_data = res.get("data", res)
-                download_url = build_download_url(file_id, api_key)
+                download_url = await build_download_url(file_id, api_key)
                 kb = file_details_kb(file_id, is_starred=star_val, download_url=download_url, folder_id=folder_id, page=page)
                 await event.edit(buttons=kb)
         except Exception as e:
@@ -1131,7 +1175,7 @@ async def callback_handler(event):
 
             if file_data:
                 file_name = file_data.get("name", f"file_{file_id}")
-                download_url = build_download_url(file_id, api_key)
+                download_url = await build_download_url(file_id, api_key)
                 
                 status_msg = await event.respond(f"⏳ <i>Streaming {clean_html(file_name)} to this chat...</i>", parse_mode="html")
                 try:
@@ -1222,19 +1266,19 @@ async def callback_handler(event):
             size = f_data.get("size", 0)
             mime = f_data.get("mimeType", "N/A")
             created_at = f_data.get("created_at")
-            download_url = build_download_url(file_id, api_key)
+            dl_info = await get_file_download_info(api_key, file_id)
+            download_url = dl_info.get("download_url", "")
             is_starred = f_data.get("starred", False)
             dest = f_data.get("destination", "Telegram Cloud ('Saved Messages')")
-            icon = get_mime_icon(mime, name)
-            text_card = (
-                f"{icon} <b>FILE DETAILS</b>\n\n"
-                f"🏷️ <b>Name:</b> <code>{clean_html(name)}</code>\n"
-                f"📦 <b>Size:</b> <code>{format_bytes(size)}</code>\n"
-                f"📑 <b>MIME Type:</b> <code>{clean_html(mime)}</code>\n"
-                f"🆔 <b>Message ID:</b> <code>#{file_id}</code>\n"
-                f"📂 <b>Folder:</b> 📁 <code>{clean_html(target_name)}</code>\n"
-                f"📅 <b>Uploaded:</b> {format_date(created_at)}\n"
-                f"📍 <b>Storage:</b> {clean_html(dest)}\n"
+            text_card = format_file_card_text(
+                name=name,
+                size=size,
+                mime=mime,
+                file_id=file_id,
+                created_at=created_at,
+                dest=dest,
+                dl_info=dl_info,
+                folder_name=target_name
             )
             kb = file_details_kb(file_id, is_starred=is_starred, download_url=download_url, folder_id=target_folder_id, page=page)
             await event.edit(text_card, buttons=kb, parse_mode="html")

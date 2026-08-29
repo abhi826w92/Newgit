@@ -82,7 +82,7 @@ def files_list_kb(items: list, page: int, total_items: int, per_page: int = 6, f
     # Actions row
     action_row = [
         Button.inline("📂 Folders", b"menu_folders:root"),
-        Button.inline("🔄 Refresh", f"menu_files:{folder_id}:{page}".encode('utf-8')),
+        Button.inline("🔄 Refresh", f"menu_files:{folder_id}:{page}:refresh".encode('utf-8')),
         Button.inline("🏠 Main Menu", b"menu_main")
     ]
     buttons.append(action_row)

@@ -1,10 +1,12 @@
 import os
+import time
 import asyncio
 import httpx
 import aiohttp
 import logging
 from collections import defaultdict
 from config import API_BASE_URL
+from helpers import format_date
 
 logger = logging.getLogger(__name__)
 
@@ -442,3 +444,115 @@ async def empty_trash(api_key: str):
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.delete(url, headers=headers)
         return resp.json()
+
+# In-Memory Cache for signed direct download links: (api_key, file_id) -> (download_url, expires_at_timestamp)
+_share_link_cache = {}
+
+async def generate_share_link(api_key: str, file_id: str):
+    """Generate signed public share link data via TG Drive /v1/files/{file_id}/share."""
+    if not api_key or not file_id:
+        return {}
+    file_id_str = str(file_id).strip()
+    url = f"{API_BASE_URL}/v1/files/{file_id_str}/share"
+    headers = _get_headers(api_key)
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post(url, headers=headers, json={})
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                if data.get("status") == "success":
+                    return data.get("data", {})
+            
+            # Fallback to GET
+            get_resp = await client.get(url, headers=headers)
+            if get_resp.status_code in (200, 201):
+                data = get_resp.json()
+                if data.get("status") == "success":
+                    return data.get("data", {})
+    except Exception as e:
+        logger.warning(f"Failed to call share API for #{file_id_str}: {e}")
+    return {}
+
+async def get_file_download_info(api_key: str, file_id: str) -> dict:
+    """Generate signed public direct download link with expiration and validation metadata.
+    Returns:
+        {
+            "download_url": str,
+            "share_url": str,
+            "stream_url": str,
+            "expires_at": int,
+            "expires_in_hours": int,
+            "validity_text": str,
+            "expiry_date": str
+        }
+    """
+    if not file_id:
+        return {"download_url": "", "validity_text": "N/A", "expiry_date": "N/A", "expires_at": 0}
+    
+    file_id_str = str(file_id).strip()
+    now = time.time()
+    if not api_key:
+        return {
+            "download_url": f"{API_BASE_URL}/v1/files/{file_id_str}/download",
+            "share_url": "",
+            "stream_url": "",
+            "validity_text": "24 Hours",
+            "expiry_date": format_date(int(now + 86400)),
+            "expires_at": int(now + 86400)
+        }
+    
+    clean_key = api_key.strip()
+    cache_key = (clean_key, file_id_str)
+
+    # Return cached info if valid with at least 5 minutes before expiry
+    if cache_key in _share_link_cache:
+        cached_info = _share_link_cache[cache_key]
+        exp_ts = cached_info.get("expires_at", 0)
+        if now < (exp_ts - 300):
+            return cached_info
+
+    share_data = await generate_share_link(clean_key, file_id_str)
+    if share_data:
+        dl_url = share_data.get("download_url")
+        exp_ts = int(share_data.get("expires_at") or (now + 86400))
+        hours = int(share_data.get("expires_in_hours") or 24)
+        token = share_data.get("token")
+        u = share_data.get("user_id")
+
+        if not dl_url and token and u:
+            dl_url = f"{API_BASE_URL}/d/{file_id_str}?token={token}&exp={exp_ts}&u={u}"
+
+        if dl_url:
+            expiry_str = format_date(exp_ts)
+            result = {
+                "download_url": dl_url,
+                "share_url": share_data.get("share_url", ""),
+                "stream_url": share_data.get("stream_url", ""),
+                "expires_at": exp_ts,
+                "expires_in_hours": hours,
+                "validity_text": f"{hours} Hours",
+                "expiry_date": expiry_str
+            }
+            _share_link_cache[cache_key] = result
+            return result
+
+    # Fallback to API Key query parameter
+    exp_fallback = int(now + 86400)
+    fallback_res = {
+        "download_url": f"{API_BASE_URL}/v1/files/{file_id_str}/download?api_key={clean_key}",
+        "share_url": "",
+        "stream_url": "",
+        "validity_text": "24 Hours",
+        "expiry_date": format_date(exp_fallback),
+        "expires_at": exp_fallback
+    }
+    return fallback_res
+
+async def get_file_download_link(api_key: str, file_id: str) -> str:
+    """Generate signed public fast direct download link with token, exp, and u query params.
+    Example: https://tgdriveapi.youganksaini1.workers.dev/d/191?token=shr_6f5b0bf173ff2bf6&exp=1788095980&u=8893079651
+    """
+    info = await get_file_download_info(api_key, file_id)
+    return info.get("download_url", "")
+
+
