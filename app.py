@@ -480,8 +480,9 @@ def trigger_guard_violation(fname, reason, peak_cpu, peak_ram_mb):
     notify_all_admins(alert_text, reply_markup=markup)
 
 def resource_guard_monitor(proc, fname):
-    """Real-time Guard: Detects Crypto-Mining, >60% CPU Loops, DDoS Socket Floods, and Mass Spamming."""
+    """Real-time Guard: Detects Crypto-Mining, >60% CPU Loops, DDoS Socket Floods, and Runaway Spam Loops."""
     high_cpu_count = 0
+    spam_burst_count = 0
     max_cpu_seen = 0.0
     last_log_count = 0
     last_check_time = time.time()
@@ -507,6 +508,7 @@ def resource_guard_monitor(proc, fname):
             logs_per_sec = (current_log_count - last_log_count) / dt
             last_log_count = current_log_count
             last_check_time = now
+            start_age = now - pdata.get("start_time", now)
 
             # 2. ⛏️ Crypto-Mining Detection in Execution Logs
             recent_logs_str = " ".join(pdata.get("logs", [])[-15:]).lower()
@@ -534,15 +536,19 @@ def resource_guard_monitor(proc, fname):
             except (psutil.AccessDenied, Exception):
                 pass
 
-            # 4. 📩 Mass Spamming Rate Limiter (>40 log lines / burst per sec without sleep)
-            if logs_per_sec > 40.0:
-                trigger_guard_violation(
-                    fname,
-                    reason=f"📩 Mass Spamming Rate Limit Exceeded ({logs_per_sec:.0f} requests/logs per sec)",
-                    peak_cpu=cpu_usage,
-                    peak_ram_mb=ram_mb
-                )
-                return
+            # 4. 📩 Runaway Infinite Log Spamming (Sustained >250 logs/sec for 3 checks ~6s, with startup grace period)
+            if start_age > 20.0 and logs_per_sec > 250.0:
+                spam_burst_count += 1
+                if spam_burst_count >= 3:
+                    trigger_guard_violation(
+                        fname,
+                        reason=f"📩 Runaway Infinite Log Spamming ({logs_per_sec:.0f} logs/sec sustained)",
+                        peak_cpu=cpu_usage,
+                        peak_ram_mb=ram_mb
+                    )
+                    return
+            else:
+                spam_burst_count = max(0, spam_burst_count - 1)
 
             # 5. 🔄 Heavy Infinite Loop Detection (>60% CPU for 3 consecutive checks ~ 6s)
             if cpu_usage > 60.0:
