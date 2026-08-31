@@ -5,7 +5,8 @@
   ],
   "active_scripts": [
     "dafont_vps_exporter/bot.py",
-    "xxtgdriveapibot/main.py"
+    "xxtgdriveapibot/main.py",
+    "tgdriveapi-python (3)/app.py"
   ],
   "auto_run_file": null,
   "env_vault": {
