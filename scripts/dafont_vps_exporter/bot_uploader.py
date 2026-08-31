@@ -19,7 +19,7 @@ def send_message(chat_id, text):
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode('utf-8'))
     except Exception as e:
         print(f"[!] Error sending message: {e}")
         return None
@@ -53,7 +53,7 @@ def send_document(chat_id, file_path, caption=""):
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
+                res = json.loads(resp.read().decode('utf-8'))
                 if res.get("ok"):
                     print(f"[✓] Successfully sent '{file_name}' to Telegram!")
                     return True

@@ -13,17 +13,20 @@ import urllib.parse
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# ----------------- CONFIGURATION -----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8486999738:AAEXkcxrILtF2AH2YfPesT1vwUAhPKiRVYs")
 CHAT_ID = os.getenv("CHAT_ID", "-1003887776900")
 MAX_THREADS = int(os.getenv("THREADS", "64"))
-DOWNLOAD_LIMIT = int(os.getenv("LIMIT", "0"))
+DOWNLOAD_LIMIT = int(os.getenv("LIMIT", "0"))  # 0 = All fonts
 
 ARCHIVE_DIR = "dafont_archive"
 BUNDLES_DIR = "telegram_bundles"
 DB_PATH = "fonts_index.db"
-CHUNK_SIZE_MB = 45
+CHUNK_SIZE_MB = 45  # Telegram Bot API limit is 50MB; 45MB is safe
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+# ----------------- TELEGRAM API -----------------
 
 def tg_send_message(text):
     print(f"\n[Telegram] {text}")
@@ -32,16 +35,10 @@ def tg_send_message(text):
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
+        err_body = e.read().decode('utf-8', errors='replace')
         print(f"[!] Telegram API Error: {err_body}")
-        if "need administrator rights" in err_body:
-            print("\n[!] ==========================================================================")
-            print("[!] CRITICAL TELEGRAM PERMISSION ERROR:")
-            print("[!] Bot (@Test02639bot) is NOT an Admin in the channel (-1003887776900)!")
-            print("[!] TO FIX: Open your Telegram Channel -> Administrators -> Add @Test02639bot as Admin.")
-            print("[!] ==========================================================================\n")
         return None
     except Exception as e:
         print(f"[!] Telegram send message error: {e}")
@@ -52,7 +49,7 @@ def tg_send_document(file_path, caption=""):
     boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
     file_name = os.path.basename(file_path)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"[*] Uploading \"{file_name}\" ({file_size_mb:.2f} MB) to Telegram...")
+    print(f"[*] Uploading '{file_name}' ({file_size_mb:.2f} MB) to Telegram...")
 
     with open(file_path, "rb") as f:
         file_bytes = f.read()
@@ -71,43 +68,56 @@ def tg_send_document(file_path, caption=""):
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
+                res = json.loads(resp.read().decode('utf-8'))
                 if res.get("ok"):
-                    print(f"[✓] Uploaded \"{file_name}\" successfully!")
+                    print(f"[✓] Uploaded '{file_name}' successfully!")
                     return True
                 else:
                     print(f"[!] Telegram API error: {res}")
         except urllib.error.HTTPError as e:
-            print(f"[!] Upload HTTP Error: {e.read().decode("utf-8", errors="replace")}")
+            err_body = e.read().decode('utf-8', errors='replace')
+            print(f"[!] Upload HTTP Error: {err_body}")
             time.sleep(2)
         except Exception as e:
             print(f"[!] Upload attempt {attempt + 1} failed: {e}")
             time.sleep(2)
     return False
 
+# ----------------- DATABASE -----------------
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("PRAGMA synchronous = OFF;")
     cur.execute("PRAGMA journal_mode = WAL;")
-    cur.execute("CREATE TABLE IF NOT EXISTS fonts (slug TEXT PRIMARY KEY, source TEXT, status TEXT DEFAULT "pending", font_files INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS fonts (
+            slug TEXT PRIMARY KEY,
+            source TEXT,
+            status TEXT DEFAULT 'pending',
+            font_files INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
+
+# ----------------- HIGH SPEED CRAWLER -----------------
 
 def crawl_alphabet_page(letter, page):
     url = f"https://www.dafont.com/alpha.php?lettre={letter}&page={page}"
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read().decode("iso-8859-1", errors="replace")
-        links = re.findall(r"href="//dl\.dafont\.com/dl/\?f=([a-z0-9_\-]+)"", html)
+            html = resp.read().decode('iso-8859-1', errors='replace')
+        links = re.findall(r'href="//dl\.dafont\.com/dl/\?f=([a-z0-9_\-]+)"', html)
         return links
     except Exception:
         return []
 
 def crawl_all_alphabets():
     init_db()
-    letters = [chr(c) for c in range(ord("a"), ord("z") + 1)] + ["ot_1"]
+    letters = [chr(c) for c in range(ord('a'), ord('z') + 1)] + ['ot_1']
     print(f"\n[*] Crawling full DaFont Alphabet across {len(letters)} sections...")
     tg_send_message(f"🔍 *Starting DaFont Alphabet Crawl across {len(letters)} sections...*")
     
@@ -135,12 +145,14 @@ def crawl_all_alphabets():
             page += 1
             time.sleep(0.05)
             
-        print(f"[✓] Letter "{letter}" finished: {letter_count} fonts indexed.")
+        print(f"[✓] Letter '{letter}' finished: {letter_count} fonts indexed.")
 
     conn.close()
     print(f"\n[✓] Alphabet Crawl Finished! Total Fonts Indexed: {total_indexed}")
     tg_send_message(f"✅ *Indexing Complete!*\nTotal Fonts Found: *{total_indexed}*\nStarting mass parallel download with {MAX_THREADS} worker threads...")
     return total_indexed
+
+# ----------------- PARALLEL STREAM DOWNLOADER -----------------
 
 def download_worker(slug, out_dir):
     url = f"https://dl.dafont.com/dl/?f={slug}"
@@ -156,7 +168,7 @@ def download_worker(slug, out_dir):
                 
                 os.makedirs(font_folder, exist_ok=True)
                 with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    font_files = [f for f in z.namelist() if f.lower().endswith((".ttf", ".otf", ".woff", ".woff2"))]
+                    font_files = [f for f in z.namelist() if f.lower().endswith(('.ttf', '.otf', '.woff', '.woff2'))]
                     for f in font_files:
                         z.extract(f, font_folder)
                     return slug, True, len(font_files)
@@ -168,7 +180,7 @@ def run_mass_downloader(limit, threads):
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    query = "SELECT slug FROM fonts WHERE status = "pending""
+    query = "SELECT slug FROM fonts WHERE status = 'pending'"
     if limit > 0:
         query += f" LIMIT {limit}"
     cur.execute(query)
@@ -198,7 +210,7 @@ def run_mass_downloader(limit, threads):
         for future in as_completed(future_to_slug):
             slug, ok, font_count = future.result()
             count += 1
-            status = "downloaded" if ok else "failed"
+            status = 'downloaded' if ok else 'failed'
             update_cur.execute("UPDATE fonts SET status = ?, font_files = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?", (status, font_count, slug))
             if ok:
                 successful += 1
@@ -208,13 +220,16 @@ def run_mass_downloader(limit, threads):
                 update_conn.commit()
                 elapsed = time.time() - start_time
                 rate = count / elapsed if elapsed > 0 else 0
-                print(f"  [Progress] {count}/{total} ({(count*100.0/total):.1f}%) | {successful} downloaded | {extracted_total} .TTF/.OTF files | {rate:.1f} fonts/sec")
+                pct = (count * 100.0 / total)
+                print(f"  [Progress] {count}/{total} ({pct:.1f}%) | {successful} downloaded | {extracted_total} .TTF/.OTF files | {rate:.1f} fonts/sec")
 
     update_conn.commit()
     update_conn.close()
 
     elapsed = time.time() - start_time
     print(f"\n[✓] Mass Download Complete in {elapsed:.1f}s ({successful}/{total} successful, {extracted_total} font files)")
+
+# ----------------- BUNDLER & CLEANUP -----------------
 
 def bundle_fonts_into_chunks(source_dir=ARCHIVE_DIR, bundles_dir=BUNDLES_DIR, max_mb=CHUNK_SIZE_MB):
     os.makedirs(bundles_dir, exist_ok=True)
@@ -223,7 +238,7 @@ def bundle_fonts_into_chunks(source_dir=ARCHIVE_DIR, bundles_dir=BUNDLES_DIR, ma
     font_files = []
     for root, dirs, files in os.walk(source_dir):
         for f in files:
-            if f.lower().endswith((".ttf", ".otf", ".woff", ".woff2")):
+            if f.lower().endswith(('.ttf', '.otf', '.woff', '.woff2')):
                 fpath = os.path.join(root, f)
                 relpath = os.path.relpath(fpath, source_dir)
                 font_files.append((fpath, relpath, os.path.getsize(fpath)))
@@ -242,7 +257,8 @@ def bundle_fonts_into_chunks(source_dir=ARCHIVE_DIR, bundles_dir=BUNDLES_DIR, ma
         if curr_size + fsize > max_bytes and curr_size > 0:
             curr_zip.close()
             created_zips.append(curr_path)
-            print(f"  [+] Created bundle: {curr_path} ({os.path.getsize(curr_path)/(1024*1024):.2f} MB)")
+            size_mb = os.path.getsize(curr_path) / (1024 * 1024)
+            print(f"  [+] Created bundle: {curr_path} ({size_mb:.2f} MB)")
             idx += 1
             curr_path = os.path.join(bundles_dir, f"dafont_archive_part{idx}.zip")
             curr_zip = zipfile.ZipFile(curr_path, "w", zipfile.ZIP_DEFLATED)
@@ -253,7 +269,8 @@ def bundle_fonts_into_chunks(source_dir=ARCHIVE_DIR, bundles_dir=BUNDLES_DIR, ma
 
     curr_zip.close()
     created_zips.append(curr_path)
-    print(f"  [+] Created final bundle: {curr_path} ({os.path.getsize(curr_path)/(1024*1024):.2f} MB)")
+    size_mb = os.path.getsize(curr_path) / (1024 * 1024)
+    print(f"  [+] Created final bundle: {curr_path} ({size_mb:.2f} MB)")
     return created_zips
 
 def run_full_cleanup():
@@ -273,12 +290,15 @@ def run_full_cleanup():
                 pass
     print("[✓] ALL DATA WIPED. 100% Free Disk Space Restored.")
 
+# ----------------- MAIN PIPELINE -----------------
+
 def main():
+    limit_str = "ALL FONTS" if DOWNLOAD_LIMIT == 0 else str(DOWNLOAD_LIMIT)
     print("=" * 60)
     print(" 🚀 DAFONT COMPLETE VPS EXPORTER & TELEGRAM BOT UPLOADER")
     print(f"[*] Target Chat: {CHAT_ID}")
     print(f"[*] Worker Threads: {MAX_THREADS}")
-    print(f"[*] Limit: {"ALL FONTS" if DOWNLOAD_LIMIT == 0 else DOWNLOAD_LIMIT}")
+    print(f"[*] Limit: {limit_str}")
     print("=" * 60)
 
     tg_send_message("🚀 *DaFont Mass Exporter Started on VPS!*\nBeginning Alphabet indexing and parallel extraction...")
