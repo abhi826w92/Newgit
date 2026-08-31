@@ -13,16 +13,17 @@ import urllib.parse
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ----------------- CONFIGURATION -----------------
+# ----------------- TURBO CONFIGURATION -----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8486999738:AAEXkcxrILtF2AH2YfPesT1vwUAhPKiRVYs")
 CHAT_ID = os.getenv("CHAT_ID", "-1003887776900")
-MAX_THREADS = int(os.getenv("THREADS", "64"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))  # Upload chunk every 500 fonts (~40MB)
+MAX_THREADS = int(os.getenv("THREADS", "128"))       # 128 Ultra-fast Parallel Download Threads
+CRAWL_THREADS = int(os.getenv("CRAWL_THREADS", "32")) # 32 Parallel Page Crawl Threads
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))      # 500 fonts per Telegram ZIP part (~40MB)
 
 ARCHIVE_DIR = "dafont_archive"
 BUNDLES_DIR = "telegram_bundles"
 DB_PATH = "fonts_index.db"
-CHUNK_SIZE_MB = 45  # Telegram Bot API limit is 50MB; 45MB is safe
+CHUNK_SIZE_MB = 45  # Telegram Bot API max safe limit
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
@@ -83,7 +84,7 @@ def tg_send_document(file_path, caption=""):
             time.sleep(2)
     return False
 
-# ----------------- DATABASE WITH STATE RESUMPTION -----------------
+# ----------------- DATABASE -----------------
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -131,7 +132,7 @@ def is_letter_completed(letter):
 def mark_letter_completed(letter):
     set_meta(f"letter_{letter}_done", "true")
 
-# ----------------- FAST SMART CRAWLER -----------------
+# ----------------- TURBO PARALLEL CRAWLER -----------------
 
 def crawl_alphabet_page(letter, page):
     url = f"https://www.dafont.com/alpha.php?lettre={letter}&page={page}"
@@ -140,51 +141,55 @@ def crawl_alphabet_page(letter, page):
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode('iso-8859-1', errors='replace')
         links = re.findall(r'href="//dl\.dafont\.com/dl/\?f=([a-z0-9_\-]+)"', html)
-        return links
+        return page, links
     except Exception:
-        return []
+        return page, []
 
-def crawl_single_letter(letter):
+def crawl_single_letter_turbo(letter):
     if is_letter_completed(letter):
-        print(f"[✓] Letter '{letter}' is ALREADY completed. Skipping crawl.")
+        print(f"[✓] Section '{letter}' is ALREADY completed. Skipping crawl.")
         return 0
 
-    print(f"\n[*] Crawling section '{letter}'...")
+    print(f"\n[*] Turbo Crawling Section '{letter}' with {CRAWL_THREADS} parallel threads...")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     
     cur.execute("SELECT slug FROM fonts WHERE source = ?", (f"alpha_{letter}",))
     seen = set([r[0] for r in cur.fetchall()])
     
-    page = 1
-    consecutive_duplicates = 0
+    current_page = 1
+    chunk_size = 40
     new_total = 0
 
-    while consecutive_duplicates < 2:
-        links = crawl_alphabet_page(letter, page)
-        new_links = [s for s in links if s not in seen]
-        
-        if not new_links or len(links) < 15:
-            consecutive_duplicates += 1
-        else:
-            consecutive_duplicates = 0
-            for s in new_links:
-                seen.add(s)
-            
-            cur.executemany("INSERT OR IGNORE INTO fonts (slug, source) VALUES (?, ?)", [(s, f"alpha_{letter}") for s in new_links])
-            conn.commit()
-            new_total += len(new_links)
-            if page % 15 == 0:
-                print(f"  [Letter {letter}] Page {page} | +{len(new_links)} new fonts | Total in section: {len(seen)}")
-        
-        page += 1
-        time.sleep(0.03)
+    while True:
+        pages_to_fetch = list(range(current_page, current_page + chunk_size))
+        with ThreadPoolExecutor(max_workers=CRAWL_THREADS) as executor:
+            page_results = list(executor.map(lambda p: crawl_alphabet_page(letter, p), pages_to_fetch))
+
+        page_results.sort(key=lambda x: x[0])
+        chunk_had_new = False
+
+        for page, links in page_results:
+            new_links = [s for s in links if s not in seen and len(links) >= 15]
+            if new_links:
+                chunk_had_new = True
+                for s in new_links:
+                    seen.add(s)
+                cur.executemany("INSERT OR IGNORE INTO fonts (slug, source) VALUES (?, ?)", [(s, f"alpha_{letter}") for s in new_links])
+                conn.commit()
+                new_total += len(new_links)
+
+        print(f"  [Section {letter}] Scanned pages {current_page}–{current_page + chunk_size - 1} | Total fonts: {len(seen)}")
+
+        if not chunk_had_new:
+            break
+        current_page += chunk_size
 
     conn.close()
-    print(f"[✓] Section '{letter}' indexed: {len(seen)} fonts total (+{new_total} new).")
+    print(f"[✓] Section '{letter}' Turbo Crawl Complete! Indexed {len(seen)} unique fonts (+{new_total} new).")
     return new_total
 
-# ----------------- PARALLEL STREAM DOWNLOADER -----------------
+# ----------------- TURBO PARALLEL DOWNLOADER (128 THREADS) -----------------
 
 def download_worker(slug, out_dir):
     url = f"https://dl.dafont.com/dl/?f={slug}"
@@ -193,7 +198,7 @@ def download_worker(slug, out_dir):
     
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 data = resp.read()
                 if not data.startswith(b"PK"):
                     return slug, False, 0
@@ -205,7 +210,7 @@ def download_worker(slug, out_dir):
                         z.extract(f, font_folder)
                     return slug, True, len(font_files)
         except Exception:
-            time.sleep(0.15)
+            time.sleep(0.1)
     return slug, False, 0
 
 def upload_and_clean_batch(batch_slugs, part_idx):
@@ -232,7 +237,7 @@ def upload_and_clean_batch(batch_slugs, part_idx):
             z.write(fpath, relpath)
 
     size_mb = os.path.getsize(bundle_path) / (1024 * 1024)
-    caption = f"📦 *DaFont Fonts Bundle* [Part #{part_idx}]\nContains *{len(font_files)} font binaries* ({size_mb:.2f} MB)"
+    caption = f"📦 *DaFont Fonts Bundle* [Part #{part_idx}]\nContains *{len(font_files)} font files* ({size_mb:.2f} MB)"
     
     uploaded = tg_send_document(bundle_path, caption)
     
@@ -251,12 +256,12 @@ def upload_and_clean_batch(batch_slugs, part_idx):
         if os.path.exists(bundle_path):
             os.remove(bundle_path)
             
-        print(f"[✓] Part #{part_idx} ({len(font_files)} fonts) uploaded to Telegram & wiped from VPS storage.")
+        print(f"[✓] Part #{part_idx} ({len(font_files)} fonts) safely sent to Telegram & deleted from VPS.")
         set_meta("last_part_idx", part_idx)
         return True
     return False
 
-def process_section_fonts(letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
+def process_section_fonts_turbo(letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     
     while True:
@@ -268,13 +273,15 @@ def process_section_fonts(letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
 
         if not rows:
             mark_letter_completed(letter)
-            print(f"[✓] All fonts in Section '{letter}' successfully downloaded, uploaded to Telegram, and cleaned!")
+            print(f"[✓] All fonts in Section '{letter}' successfully downloaded, uploaded to Telegram, and wiped!")
             break
 
         batch_slugs = [r[0] for r in rows]
         part_idx = int(get_meta("last_part_idx", "0")) + 1
 
-        print(f"\n[*] Section '{letter}': Downloading Batch of {len(batch_slugs)} fonts (Part #{part_idx})...")
+        print(f"\n[*] Section '{letter}': Downloading {len(batch_slugs)} fonts with {threads} PARALLEL THREADS (Part #{part_idx})...")
+        start_time = time.time()
+
         with ThreadPoolExecutor(max_workers=threads) as executor:
             future_to_slug = {executor.submit(download_worker, s, ARCHIVE_DIR): s for s in batch_slugs}
             done_count = 0
@@ -282,11 +289,13 @@ def process_section_fonts(letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
                 slug, ok, font_count = future.result()
                 done_count += 1
                 if done_count % 100 == 0 or done_count == len(batch_slugs):
-                    print(f"  [Section {letter} | Part #{part_idx}] {done_count}/{len(batch_slugs)} downloaded in RAM...")
+                    elapsed = time.time() - start_time
+                    speed = done_count / elapsed if elapsed > 0 else 0
+                    print(f"  [Section {letter} | Part #{part_idx}] {done_count}/{len(batch_slugs)} downloaded ({speed:.1f} fonts/sec)...")
 
-        # Package and upload immediately!
+        # Package and upload to Telegram immediately!
         upload_and_clean_batch(batch_slugs, part_idx)
-        time.sleep(1)
+        time.sleep(0.5)
 
 # ----------------- MASTER PIPELINE -----------------
 
@@ -295,42 +304,41 @@ def main():
     letters = [chr(c) for c in range(ord('a'), ord('z') + 1)] + ['ot_1']
     
     print("=" * 65)
-    print(" 🚀 DAFONT SECTION-BY-SECTION RESUMABLE STREAM EXPORTER")
+    print(" 🚀 DAFONT TURBO RESUMABLE STREAM EXPORTER (128 THREADS)")
     print(f"[*] Target Chat: {CHAT_ID}")
-    print(f"[*] Worker Threads: {MAX_THREADS}")
+    print(f"[*] Download Threads: {MAX_THREADS} | Crawl Threads: {CRAWL_THREADS}")
     print(f"[*] Batch Size: {BATCH_SIZE} fonts per Telegram ZIP")
     print("=" * 65)
 
-    # Check already completed letters
     completed_letters = [l for l in letters if is_letter_completed(l)]
     last_part = int(get_meta("last_part_idx", "0"))
 
     if completed_letters:
         print(f"\n[🔄 RESUME DETECTED] Completed Sections: {', '.join(completed_letters)}")
         print(f"[🔄 RESUME DETECTED] Last Uploaded Part: #{last_part}")
-        tg_send_message(f"🔄 *VPS Auto-Resume Active!*\nAlready Completed: *{len(completed_letters)}/27 Sections* (Part #{last_part})\nResuming download stream on next pending section...")
+        tg_send_message(f"🔄 *VPS Auto-Resume Active!*\nCompleted Sections: *{len(completed_letters)}/27* (Part #{last_part})\nResuming download stream on next pending section...")
     else:
-        tg_send_message("🚀 *DaFont Section-by-Section Live Exporter Started!*\nProcessing letters sequentially with immediate Telegram delivery...")
+        tg_send_message("🚀 *DaFont TURBO Live Exporter Started (128 Threads)!*\nProcessing letters with immediate parallel Telegram delivery...")
 
-    # Process each letter sequentially: CRAWL -> DOWNLOAD -> UPLOAD -> CLEAN
+    # Process each letter: TURBO CRAWL (seconds) -> TURBO DOWNLOAD (128 threads) -> TELEGRAM UPLOAD -> WIPE
     for letter in letters:
         if is_letter_completed(letter):
             continue
 
         print(f"\n==========================================================")
-        print(f"  ▶ STARTING SECTION '{letter.upper()}' (Crawl ➔ Download ➔ Telegram Upload)")
+        print(f"  ▶ STARTING SECTION '{letter.upper()}' (Turbo Crawl ➔ 128-Thread Download ➔ Telegram)")
         print(f"==========================================================")
         
-        # 1. Crawl this letter (takes ~1-2 min)
-        crawl_single_letter(letter)
+        # 1. Turbo Crawl (parallel 32 threads, finishes in ~10-15 seconds!)
+        crawl_single_letter_turbo(letter)
 
-        # 2. Download in 500-font chunks and upload to Telegram immediately!
-        process_section_fonts(letter, MAX_THREADS, BATCH_SIZE)
+        # 2. Turbo Download (128 parallel threads) & immediate upload to Telegram
+        process_section_fonts_turbo(letter, MAX_THREADS, BATCH_SIZE)
 
     print("\n" + "=" * 65)
-    print(" 🎉 ALL 27 ALPHABET SECTIONS FULLY EXPORTED & UPLOADED TO TELEGRAM!")
+    print(" 🎉 ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT TO TELEGRAM!")
     print("=" * 65)
-    tg_send_message("🎉 *ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT TO TELEGRAM!*\nAll server data wiped clean.")
+    tg_send_message("🎉 *ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT TO TELEGRAM!*\nAll VPS storage wiped 100% clean.")
 
 if __name__ == "__main__":
     main()
