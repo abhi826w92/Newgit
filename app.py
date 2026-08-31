@@ -480,8 +480,7 @@ def trigger_guard_violation(fname, reason, peak_cpu, peak_ram_mb):
     notify_all_admins(alert_text, reply_markup=markup)
 
 def resource_guard_monitor(proc, fname):
-    """Real-time Guard: Detects Crypto-Mining, >60% CPU Loops, DDoS Socket Floods, and Runaway Spam Loops."""
-    high_cpu_count = 0
+    """Real-time Guard: Detects Crypto-Mining, DDoS Socket Floods, and Runaway Log Spam Loops."""
     spam_burst_count = 0
     max_cpu_seen = 0.0
     last_log_count = 0
@@ -494,7 +493,7 @@ def resource_guard_monitor(proc, fname):
 
     while proc.poll() is None:
         try:
-            # 1. Measure CPU and RAM
+            # 1. Measure CPU and RAM for telemetry
             cpu_usage = ps_proc.cpu_percent(interval=2.0)
             mem_info = ps_proc.memory_info()
             ram_mb = mem_info.rss // (1024 * 1024)
@@ -522,10 +521,10 @@ def resource_guard_monitor(proc, fname):
                     )
                     return
 
-            # 3. 🌊 DDoS & Network Flooding Detection (Open Socket Threshold > 120)
+            # 3. 🌊 DDoS & Network Flooding Detection (Open Socket Threshold > 250)
             try:
                 open_conns = len(ps_proc.net_connections(kind='inet'))
-                if open_conns > 120:
+                if open_conns > 250:
                     trigger_guard_violation(
                         fname,
                         reason=f"🌊 DDoS / Network Socket Flood Detected ({open_conns} concurrent network sockets)",
@@ -536,10 +535,10 @@ def resource_guard_monitor(proc, fname):
             except (psutil.AccessDenied, Exception):
                 pass
 
-            # 4. 📩 Runaway Infinite Log Spamming (Sustained >250 logs/sec for 3 checks ~6s, with startup grace period)
-            if start_age > 20.0 and logs_per_sec > 250.0:
+            # 4. 📩 Runaway Infinite Log Spamming (Sustained >300 logs/sec for 4 checks ~8s, with startup grace period)
+            if start_age > 25.0 and logs_per_sec > 300.0:
                 spam_burst_count += 1
-                if spam_burst_count >= 3:
+                if spam_burst_count >= 4:
                     trigger_guard_violation(
                         fname,
                         reason=f"📩 Runaway Infinite Log Spamming ({logs_per_sec:.0f} logs/sec sustained)",
@@ -549,21 +548,6 @@ def resource_guard_monitor(proc, fname):
                     return
             else:
                 spam_burst_count = max(0, spam_burst_count - 1)
-
-            # 5. 🔄 Heavy Infinite Loop Detection (>60% CPU for 3 consecutive checks ~ 6s)
-            if cpu_usage > 60.0:
-                high_cpu_count += 1
-                logger.warning(f"⚠️ [ResourceGuard] High CPU usage on {fname}: {cpu_usage:.1f}% ({high_cpu_count}/3)")
-                if high_cpu_count >= 3:
-                    trigger_guard_violation(
-                        fname,
-                        reason=f"🔄 Sustained High CPU Load (>60% Limit: {cpu_usage:.1f}%) - Runaway Infinite Loop Detected",
-                        peak_cpu=cpu_usage,
-                        peak_ram_mb=ram_mb
-                    )
-                    return
-            else:
-                high_cpu_count = max(0, high_cpu_count - 1)
 
             time.sleep(2)
         except psutil.NoSuchProcess:
