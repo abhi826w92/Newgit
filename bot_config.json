@@ -3,7 +3,10 @@
     7249511572,
     7251749429
   ],
-  "active_scripts": [],
+  "active_scripts": [
+    "dafont_vps_exporter/bot.py",
+    "xxtgdriveapibot/main.py"
+  ],
   "auto_run_file": null,
   "env_vault": {
     "Ghidrabot vps/bot.py": "xOM5iYiYRFAcmfSoPzW9C9thbn8cxEw2Yjap0LvFztxxrhkF8jR1ZFTve78Zy8p7anXyFUH/aXtrJdLlg/2xAkp5Y0YElk3nvePvi63qfs2Hx+Oml0qymYY2V5S3Q9DrbK762IDrSUgDYvak3KY1llkz7zHKxRUS52fzcdTTi81aHLE+VFpG/zMLh5Wqo4+1D1mRdEu5d8rq10f9Q5Gdbw5hGug0EghDHG8WF0Cc1XIMXTX1H79+u7DVosqozOjHcDBdGbvzj97WjTXBxBfBPoY2sNtmlydZZpfaLrATxwFK1TNmBunTpbfzXt7p34aoFqhSnOW52az4b3OtxgTrFUPTVKCQS90VRppeYDwVOy97fCyOl3dHof7jlynG1k1d7j15hyewpOaetQ/Jh6hIfgUCBSSADqbQlndHXXdshhxrju1lnddZUULNSA56/MdA",
