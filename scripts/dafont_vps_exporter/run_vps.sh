@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-CHAT_ID="${1:--1003121382577}"
+CHAT_ID="${1:--1003887776900}"
 THREADS="${2:-64}"
 LIMIT="${3:-0}" # 0 means ALL fonts
 

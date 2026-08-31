@@ -33,13 +33,13 @@ cd dafont_vps_exporter
 ```bash
 # Syntax: bash run_vps.sh [CHAT_ID] [THREADS] [LIMIT]
 # Default: sends to your channel with 64 threads for ALL fonts
-bash run_vps.sh -1003121382577 64 0
+bash run_vps.sh -1003887776900 64 0
 ```
 
 ### 3. Custom Run Examples
 ```bash
 # Export top 10,000 fonts with 128 threads:
-bash run_vps.sh -1003121382577 128 10000
+bash run_vps.sh -1003887776900 128 10000
 
 # Export to your personal Telegram User ID:
 bash run_vps.sh 123456789 64 0

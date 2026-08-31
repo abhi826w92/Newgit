@@ -8,7 +8,7 @@ import urllib.parse
 import json
 
 BOT_TOKEN = "8486999738:AAEXkcxrILtF2AH2YfPesT1vwUAhPKiRVYs"
-DEFAULT_CHAT_ID = "-1003121382577"
+DEFAULT_CHAT_ID = "-1003887776900"
 CHUNK_SIZE_MB = 45  # Telegram Bot API max is 50MB; 45MB is safe
 ARCHIVE_DIR = "dafont_archive"
 OUTPUT_BUNDLES_DIR = "telegram_bundles"
