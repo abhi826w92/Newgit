@@ -11,7 +11,6 @@ import zipfile
 import urllib.request
 import urllib.parse
 import urllib.error
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ----------------- TURBO CONFIGURATION -----------------
@@ -19,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8486999738:AAEXkcxrILtF2AH2YfPesT1vwUAhPKiRV
 CHAT_ID = os.getenv("CHAT_ID", "-1003887776900")
 MAX_THREADS = int(os.getenv("THREADS", "128"))       # 128 Ultra-fast Parallel Download Threads
 CRAWL_THREADS = int(os.getenv("CRAWL_THREADS", "32")) # 32 Parallel Page Crawl Threads
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "300"))      # 300 fonts per Telegram ZIP part (~20-25MB for lightning-fast uploads)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))      # 500 fonts per Telegram ZIP part (~40MB)
 
 ARCHIVE_DIR = "dafont_archive"
 BUNDLES_DIR = "telegram_bundles"
@@ -48,38 +47,41 @@ def tg_send_message(text):
 
 def tg_send_document(file_path, caption=""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
     file_name = os.path.basename(file_path)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     print(f"[*] Uploading '{file_name}' ({file_size_mb:.2f} MB) to Telegram...")
 
-    for attempt in range(5):
-        try:
-            with open(file_path, "rb") as f:
-                data = {"chat_id": CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
-                files = {"document": (file_name, f, "application/zip")}
-                resp = requests.post(url, data=data, files=files, timeout=300)
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
 
-            if resp.status_code == 200:
-                res = resp.json()
+    body = []
+    body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{CHAT_ID}\r\n".encode("utf-8"))
+    if caption:
+        body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n".encode("utf-8"))
+    body.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{file_name}\"\r\nContent-Type: application/zip\r\n\r\n".encode("utf-8"))
+    body.append(file_bytes)
+    body.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    req = urllib.request.Request(url, data=b"".join(body))
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                res = json.loads(resp.read().decode('utf-8'))
                 if res.get("ok"):
                     print(f"[✓] Uploaded '{file_name}' successfully!")
-                    time.sleep(3.0)  # Cooldown between successive uploads to avoid Telegram flood throttling
                     return True
                 else:
                     print(f"[!] Telegram API error: {res}")
-            elif resp.status_code == 429:
-                try:
-                    retry_after = resp.json().get("parameters", {}).get("retry_after", 15)
-                except Exception:
-                    retry_after = 15
-                print(f"[!] Telegram FloodWait: Sleeping {retry_after}s before retry...")
-                time.sleep(retry_after + 2)
-            else:
-                print(f"[!] Upload HTTP {resp.status_code}: {resp.text[:300]}")
-                time.sleep(4.0)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='replace')
+            print(f"[!] Upload HTTP Error: {err_body}")
+            time.sleep(2)
         except Exception as e:
             print(f"[!] Upload attempt {attempt + 1} failed: {e}")
-            time.sleep(4.0)
+            time.sleep(2)
     return False
 
 # ----------------- DATABASE -----------------
