@@ -124,7 +124,14 @@ def set_meta(key, value):
     conn.commit()
     conn.close()
 
-# ----------------- SMART HIGH SPEED CRAWLER -----------------
+def is_letter_completed(letter):
+    val = get_meta(f"letter_{letter}_done", "false")
+    return val == "true"
+
+def mark_letter_completed(letter):
+    set_meta(f"letter_{letter}_done", "true")
+
+# ----------------- FAST SMART CRAWLER -----------------
 
 def crawl_alphabet_page(letter, page):
     url = f"https://www.dafont.com/alpha.php?lettre={letter}&page={page}"
@@ -137,66 +144,45 @@ def crawl_alphabet_page(letter, page):
     except Exception:
         return []
 
-def crawl_all_alphabets_resumable():
-    init_db()
-    if get_meta("crawl_complete") == "true":
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT count(*) FROM fonts")
-        total = cur.fetchone()[0]
-        conn.close()
-        print(f"[✓] Index already saved in database ({total} fonts). Skipping crawl to resume downloads immediately.")
-        return total
+def crawl_single_letter(letter):
+    if is_letter_completed(letter):
+        print(f"[✓] Letter '{letter}' is ALREADY completed. Skipping crawl.")
+        return 0
 
-    letters = [chr(c) for c in range(ord('a'), ord('z') + 1)] + ['ot_1']
-    print(f"\n[*] Crawling full DaFont Alphabet across {len(letters)} sections...")
-    tg_send_message(f"🔍 *Starting / Resuming DaFont Alphabet Crawl across {len(letters)} sections...*")
-    
+    print(f"\n[*] Crawling section '{letter}'...")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    total_indexed = 0
-    seen_global = set()
+    
+    cur.execute("SELECT slug FROM fonts WHERE source = ?", (f"alpha_{letter}",))
+    seen = set([r[0] for r in cur.fetchall()])
+    
+    page = 1
+    consecutive_duplicates = 0
+    new_total = 0
 
-    cur.execute("SELECT slug FROM fonts")
-    for row in cur.fetchall():
-        seen_global.add(row[0])
-
-    for letter in letters:
-        page = 1
-        consecutive_duplicates = 0
-        letter_count = 0
+    while consecutive_duplicates < 2:
+        links = crawl_alphabet_page(letter, page)
+        new_links = [s for s in links if s not in seen]
         
-        while consecutive_duplicates < 2:
-            links = crawl_alphabet_page(letter, page)
-            new_links = [s for s in links if s not in seen_global]
+        if not new_links or len(links) < 15:
+            consecutive_duplicates += 1
+        else:
+            consecutive_duplicates = 0
+            for s in new_links:
+                seen.add(s)
             
-            if not new_links or len(links) < 15:
-                consecutive_duplicates += 1
-            else:
-                consecutive_duplicates = 0
-                for s in new_links:
-                    seen_global.add(s)
-                
-                cur.executemany("INSERT OR IGNORE INTO fonts (slug, source) VALUES (?, ?)", [(s, f"alpha_{letter}") for s in new_links])
-                conn.commit()
-                letter_count += len(new_links)
-                total_indexed += len(new_links)
-                if page % 10 == 0:
-                    print(f"  [Letter {letter}] Page {page} | +{len(new_links)} new fonts | Total indexed: {len(seen_global)}")
-            
-            page += 1
-            time.sleep(0.04)
-            
-        print(f"[✓] Section '{letter}' finished: +{letter_count} fonts indexed.")
+            cur.executemany("INSERT OR IGNORE INTO fonts (slug, source) VALUES (?, ?)", [(s, f"alpha_{letter}") for s in new_links])
+            conn.commit()
+            new_total += len(new_links)
+            if page % 15 == 0:
+                print(f"  [Letter {letter}] Page {page} | +{len(new_links)} new fonts | Total in section: {len(seen)}")
+        
+        page += 1
+        time.sleep(0.03)
 
-    set_meta("crawl_complete", "true")
-    cur.execute("SELECT count(*) FROM fonts")
-    final_count = cur.fetchone()[0]
     conn.close()
-
-    print(f"\n[✓] Master Alphabet Crawl Complete! Total Fonts Indexed: {final_count}")
-    tg_send_message(f"✅ *Indexing Complete!*\nTotal Unique Fonts: *{final_count}*\nStarting continuous download & live Telegram upload...")
-    return final_count
+    print(f"[✓] Section '{letter}' indexed: {len(seen)} fonts total (+{new_total} new).")
+    return new_total
 
 # ----------------- PARALLEL STREAM DOWNLOADER -----------------
 
@@ -221,8 +207,6 @@ def download_worker(slug, out_dir):
         except Exception:
             time.sleep(0.15)
     return slug, False, 0
-
-# ----------------- CONTINUOUS PIPELINE: DOWNLOAD -> ZIP -> UPLOAD -> CLEANUP -----------------
 
 def upload_and_clean_batch(batch_slugs, part_idx):
     os.makedirs(BUNDLES_DIR, exist_ok=True)
@@ -253,7 +237,6 @@ def upload_and_clean_batch(batch_slugs, part_idx):
     uploaded = tg_send_document(bundle_path, caption)
     
     if uploaded:
-        # Mark as uploaded in DB
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.executemany("UPDATE fonts SET status = 'uploaded', part_id = ? WHERE slug = ?", [(part_idx, s) for s in batch_slugs])
@@ -268,44 +251,30 @@ def upload_and_clean_batch(batch_slugs, part_idx):
         if os.path.exists(bundle_path):
             os.remove(bundle_path)
             
-        print(f"[✓] Part #{part_idx} ({len(font_files)} fonts) safely uploaded & local files wiped.")
+        print(f"[✓] Part #{part_idx} ({len(font_files)} fonts) uploaded to Telegram & wiped from VPS storage.")
         set_meta("last_part_idx", part_idx)
         return True
     return False
 
-def run_continuous_pipeline(threads=MAX_THREADS, batch_size=BATCH_SIZE):
+def process_section_fonts(letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT count(*) FROM fonts WHERE status = 'uploaded'")
-    already_uploaded = cur.fetchone()[0]
-    cur.execute("SELECT count(*) FROM fonts WHERE status != 'uploaded'")
-    remaining = cur.fetchone()[0]
-    conn.close()
-
-    part_idx = int(get_meta("last_part_idx", "0")) + 1
-
-    if already_uploaded > 0:
-        print(f"\n[🔄 RESUME DETECTED] {already_uploaded} fonts were already uploaded to Telegram!")
-        print(f"[🔄 RESUMING] Next Part: #{part_idx} | Remaining fonts: {remaining}")
-        tg_send_message(f"🔄 *VPS Auto-Resumed!*\nAlready Uploaded: *{already_uploaded} fonts*\nResuming download at Part *#{part_idx}* ({remaining} remaining)...")
-
     while True:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT slug FROM fonts WHERE status != 'uploaded' LIMIT ?", (batch_size,))
+        cur.execute("SELECT slug FROM fonts WHERE source = ? AND status != 'uploaded' LIMIT ?", (f"alpha_{letter}", batch_size))
         rows = cur.fetchall()
         conn.close()
 
         if not rows:
-            print("\n🎉 ALL FONTS HAVE BEEN DOWNLOADED AND UPLOADED TO TELEGRAM!")
-            tg_send_message("🎉 *ALL DAFONT ARCHIVES FULLY EXPORTED & UPLOADED TO TELEGRAM!*\nProcess complete. Freeing remaining VPS storage...")
+            mark_letter_completed(letter)
+            print(f"[✓] All fonts in Section '{letter}' successfully downloaded, uploaded to Telegram, and cleaned!")
             break
 
         batch_slugs = [r[0] for r in rows]
-        print(f"\n[*] Processing Batch #{part_idx} ({len(batch_slugs)} fonts with {threads} threads)...")
+        part_idx = int(get_meta("last_part_idx", "0")) + 1
 
+        print(f"\n[*] Section '{letter}': Downloading Batch of {len(batch_slugs)} fonts (Part #{part_idx})...")
         with ThreadPoolExecutor(max_workers=threads) as executor:
             future_to_slug = {executor.submit(download_worker, s, ARCHIVE_DIR): s for s in batch_slugs}
             done_count = 0
@@ -313,34 +282,55 @@ def run_continuous_pipeline(threads=MAX_THREADS, batch_size=BATCH_SIZE):
                 slug, ok, font_count = future.result()
                 done_count += 1
                 if done_count % 100 == 0 or done_count == len(batch_slugs):
-                    print(f"  [Batch #{part_idx}] {done_count}/{len(batch_slugs)} fonts downloaded in RAM...")
+                    print(f"  [Section {letter} | Part #{part_idx}] {done_count}/{len(batch_slugs)} downloaded in RAM...")
 
-        # Package and upload this batch immediately!
+        # Package and upload immediately!
         upload_and_clean_batch(batch_slugs, part_idx)
-        part_idx += 1
         time.sleep(1)
 
-    # Final cleanup
-    for d in [ARCHIVE_DIR, BUNDLES_DIR]:
-        if os.path.exists(d):
-            shutil.rmtree(d, ignore_errors=True)
-    print("[✓] ALL LOCAL DATA WIPED. VPS 100% CLEAN.")
-
-# ----------------- MAIN PIPELINE -----------------
+# ----------------- MASTER PIPELINE -----------------
 
 def main():
-    print("=" * 60)
-    print(" 🚀 DAFONT RESUMABLE VPS EXPORTER & LIVE TELEGRAM UPLOADER")
+    init_db()
+    letters = [chr(c) for c in range(ord('a'), ord('z') + 1)] + ['ot_1']
+    
+    print("=" * 65)
+    print(" 🚀 DAFONT SECTION-BY-SECTION RESUMABLE STREAM EXPORTER")
     print(f"[*] Target Chat: {CHAT_ID}")
     print(f"[*] Worker Threads: {MAX_THREADS}")
-    print(f"[*] Micro-Batch Size: {BATCH_SIZE} fonts per Telegram Zip")
-    print("=" * 60)
+    print(f"[*] Batch Size: {BATCH_SIZE} fonts per Telegram ZIP")
+    print("=" * 65)
 
-    # Step 1: Resumable Alphabet Indexing
-    crawl_all_alphabets_resumable()
+    # Check already completed letters
+    completed_letters = [l for l in letters if is_letter_completed(l)]
+    last_part = int(get_meta("last_part_idx", "0"))
 
-    # Step 2: Continuous Stream: Download -> Zip -> Upload to Telegram -> Delete locally
-    run_continuous_pipeline(MAX_THREADS, BATCH_SIZE)
+    if completed_letters:
+        print(f"\n[🔄 RESUME DETECTED] Completed Sections: {', '.join(completed_letters)}")
+        print(f"[🔄 RESUME DETECTED] Last Uploaded Part: #{last_part}")
+        tg_send_message(f"🔄 *VPS Auto-Resume Active!*\nAlready Completed: *{len(completed_letters)}/27 Sections* (Part #{last_part})\nResuming download stream on next pending section...")
+    else:
+        tg_send_message("🚀 *DaFont Section-by-Section Live Exporter Started!*\nProcessing letters sequentially with immediate Telegram delivery...")
+
+    # Process each letter sequentially: CRAWL -> DOWNLOAD -> UPLOAD -> CLEAN
+    for letter in letters:
+        if is_letter_completed(letter):
+            continue
+
+        print(f"\n==========================================================")
+        print(f"  ▶ STARTING SECTION '{letter.upper()}' (Crawl ➔ Download ➔ Telegram Upload)")
+        print(f"==========================================================")
+        
+        # 1. Crawl this letter (takes ~1-2 min)
+        crawl_single_letter(letter)
+
+        # 2. Download in 500-font chunks and upload to Telegram immediately!
+        process_section_fonts(letter, MAX_THREADS, BATCH_SIZE)
+
+    print("\n" + "=" * 65)
+    print(" 🎉 ALL 27 ALPHABET SECTIONS FULLY EXPORTED & UPLOADED TO TELEGRAM!")
+    print("=" * 65)
+    tg_send_message("🎉 *ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT TO TELEGRAM!*\nAll server data wiped clean.")
 
 if __name__ == "__main__":
     main()
