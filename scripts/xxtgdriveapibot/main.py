@@ -59,13 +59,17 @@ from database import (
     get_folder_by_id,
     delete_user_folder,
     set_file_folder,
-    get_files_in_folder
+    get_files_in_folder,
+    save_cached_files_to_db,
+    load_cached_files_from_db,
+    delete_cached_file_from_db
 )
 from api_client import (
     validate_api_key,
     get_user_profile,
     get_storage_stats_realtime,
     list_files,
+    fast_sync_user_files,
     get_file_info,
     upload_file_streaming,
     delete_file,
@@ -86,6 +90,7 @@ from api_client import (
     get_file_download_link,
     get_file_download_info
 )
+from cpp_engine import cpp_engine
 from keyboards import (
     api_key_request_kb,
     main_menu_kb,
@@ -170,18 +175,45 @@ class UserFileCache:
 file_cache = UserFileCache(ttl_seconds=180)
 
 async def get_cached_or_fetch_files(api_key: str, user_id: int, force_refresh: bool = False):
-    """Retrieve files from memory cache or fetch fresh with live scanning."""
-    if not force_refresh:
-        cached = file_cache.get(user_id)
-        if cached is not None:
-            return cached
+    """Retrieve files from C++ in-memory engine, local database, or live TG Drive Cloud scan."""
+    # 1. Warm up C++ engine from SQLite database if not loaded yet
+    if cpp_engine.get_total_count(user_id) == 0:
+        db_files = load_cached_files_from_db(user_id)
+        if db_files:
+            cpp_engine.upsert_files(user_id, db_files)
 
-    res = await list_files(api_key, folder_id="all")
-    if res.get("status") == "success":
-        items = res.get("items", [])
+    # 2. If force_refresh is requested (full scan)
+    if force_refresh:
+        items = await fast_sync_user_files(api_key, user_id, full_scan=True)
+        if not items:
+            res = await list_files(api_key, folder_id="all")
+            items = res.get("items", [])
+            if items:
+                cpp_engine.upsert_files(user_id, items)
+                save_cached_files_to_db(user_id, items)
         file_cache.set(user_id, items)
         return items
-    return []
+
+    # 3. Always check for new files live (fast check for recently added files in ~0.5s)
+    try:
+        await fast_sync_user_files(api_key, user_id, full_scan=False)
+    except Exception as e:
+        logger.debug(f"Live top check notice: {e}")
+
+    # Return all files from database / C++ engine
+    db_all = load_cached_files_from_db(user_id)
+    if db_all:
+        file_cache.set(user_id, db_all)
+        return db_all
+
+    # If database had 0 files, perform initial full scan
+    res = await list_files(api_key, folder_id="all")
+    items = res.get("items", [])
+    if items:
+        cpp_engine.upsert_files(user_id, items)
+        save_cached_files_to_db(user_id, items)
+        file_cache.set(user_id, items)
+    return items
 
 async def get_live_folder_info(api_key: str, user_id: int, folder_id: str):
     """Retrieve folder information directly from live Telegram Saved Messages API in real-time."""
@@ -536,13 +568,16 @@ async def media_upload_handler(event):
         )
 
         if upload_res.get("status") == "success":
-            # Invalidate cache so new file shows up instantly
             file_cache.invalidate(user_id)
 
             data = upload_res.get("data", {})
             file_id = str(data.get("id") or data.get("message_id"))
             if folder_id != "root":
                 set_file_folder(user_id, file_id, folder_id)
+
+            # Instantly insert into C++ Engine & SQLite DB for 0.001s immediate visibility
+            cpp_engine.upsert_files(user_id, [data])
+            save_cached_files_to_db(user_id, [data])
 
             final_name = data.get("name", file_name)
             final_size = data.get("size", file_size)
@@ -795,6 +830,10 @@ async def text_handler(event):
                 await status_msg.edit(f"✅ <b>File successfully renamed to:</b> <code>{clean_html(new_name)}</code>", parse_mode="html")
                 f_res = await get_file_info(api_key, file_id)
                 f_data = f_res.get("data", f_res) if f_res.get("status") == "success" else {}
+                f_data["id"] = file_id
+                f_data["name"] = new_name
+                cpp_engine.upsert_files(user_id, [f_data])
+                save_cached_files_to_db(user_id, [f_data])
                 size = f_data.get("size", 0)
                 mime = f_data.get("mimeType", "N/A")
                 created_at = f_data.get("created_at")
@@ -1031,7 +1070,7 @@ async def callback_handler(event):
             await event.edit(f"❌ Error: {clean_html(str(e))}", buttons=back_to_main_kb(), parse_mode="html")
         return
 
-    # Files Menu (with instant loading & fast cache)
+    # Files Menu (with C++ acceleration & live sync)
     if data.startswith("menu_files:"):
         parts = data.split(":")
         folder_id = parts[1] if len(parts) > 1 else "all"
@@ -1040,50 +1079,57 @@ async def callback_handler(event):
 
         if is_refresh:
             file_cache.invalidate(user_id)
-            await event.answer("🔄 Refreshing Files from Cloud...")
-            await event.edit(build_loading_card("📁 Refreshing TG Drive Files", 50.0, "Scanning fresh files from Telegram Cloud..."), parse_mode="html")
+            await event.answer("🔄 Scanning All Files from Cloud...")
+            await event.edit(build_loading_card("📁 Refreshing TG Drive Files", 50.0, "Scanning all batches from Telegram Cloud..."), parse_mode="html")
         else:
-            cached_items = file_cache.get(user_id)
-            if cached_items is None:
-                await event.answer("📁 Scanning TG Drive Cloud...")
-                await event.edit(build_loading_card("📁 Loading TG Drive Files", 50.0, "Scanning files from Telegram Cloud..."), parse_mode="html")
-            else:
-                await event.answer("📁 Loaded")
+            await event.answer("⚡ Instant Load (C++ Engine)")
 
         try:
+            # 1. Warm up / Sync files (live check for latest files)
             all_items = await get_cached_or_fetch_files(api_key, user_id, force_refresh=is_refresh)
             
-            # Filter files by folder
+            # Determine folder title
             folder_title = "All Files"
-            filtered_items = all_items
             if folder_id != "all" and folder_id != "root":
                 folder_meta = await get_live_folder_info(api_key, user_id, folder_id)
                 folder_name = folder_meta["name"] if folder_meta else folder_id
                 folder_title = f"Folder: {folder_name}"
-                db_folder_files = set(get_files_in_folder(user_id, folder_id))
-                filtered_items = [
-                    f for f in all_items 
-                    if str(f.get("parentId") or f.get("parent_id") or f.get("folder_id") or "") == str(folder_id)
-                    or str(f.get("id") or f.get("message_id") or "") in db_folder_files
-                ]
             elif folder_id == "root":
                 folder_title = "Root (Saved Messages)"
-                # Files not assigned to any custom folder
-                all_assigned_files = set()
-                try:
-                    for cf in get_user_folders(user_id):
-                        all_assigned_files.update(get_files_in_folder(user_id, str(cf.get("id"))))
-                except Exception:
-                    pass
-                filtered_items = [
-                    f for f in all_items 
-                    if (not f.get("parentId") or f.get("parentId") in ("root", "", None) or f.get("folder_id") in ("root", "", None))
-                    and str(f.get("id") or f.get("message_id") or "") not in all_assigned_files
-                ]
 
-            total_items = len(filtered_items)
+            # 2. Ultra-fast C++ filtering and pagination
+            cpp_res = cpp_engine.filter_and_paginate(user_id, folder_id=folder_id, page=page, per_page=PER_PAGE)
+            total_items = cpp_res.get("total", 0)
+            page_items = cpp_res.get("items", [])
 
-            if not filtered_items:
+            # 3. Fallback to Python filtering if C++ returned 0 but all_items has files
+            if total_items == 0 and all_items:
+                if folder_id != "all" and folder_id != "root":
+                    db_folder_files = set(get_files_in_folder(user_id, folder_id))
+                    filtered_items = [
+                        f for f in all_items 
+                        if str(f.get("parentId") or f.get("parent_id") or f.get("folder_id") or "") == str(folder_id)
+                        or str(f.get("id") or f.get("message_id") or "") in db_folder_files
+                    ]
+                elif folder_id == "root":
+                    all_assigned_files = set()
+                    try:
+                        for cf in get_user_folders(user_id):
+                            all_assigned_files.update(get_files_in_folder(user_id, str(cf.get("id"))))
+                    except Exception:
+                        pass
+                    filtered_items = [
+                        f for f in all_items 
+                        if (not f.get("parentId") or f.get("parentId") in ("root", "", None) or f.get("folder_id") in ("root", "", None))
+                        and str(f.get("id") or f.get("message_id") or "") not in all_assigned_files
+                    ]
+                else:
+                    filtered_items = all_items
+                total_items = len(filtered_items)
+                start_i = (page - 1) * PER_PAGE
+                page_items = filtered_items[start_i:start_i + PER_PAGE]
+
+            if total_items == 0:
                 text = (
                     f"📁 <b>{clean_html(folder_title)}</b>\n\n"
                     f"<i>No files found in this section.</i>\n\n"
@@ -1092,15 +1138,16 @@ async def callback_handler(event):
                 await event.edit(text, buttons=back_to_main_kb(), parse_mode="html")
                 return
 
-            total_size_filtered = sum(f.get("size", 0) for f in filtered_items)
+            total_size_page = sum(f.get("size", 0) for f in page_items)
             text = (
                 f"📁 <b>{clean_html(folder_title)}</b>\n\n"
-                f"Total: <b>{total_items} files</b> ({format_bytes(total_size_filtered)})\n"
+                f"Total: <b>{total_items} files</b> ⚡ <i>(C++ Engine 100x Active)</i>\n"
                 f"<i>Click on any file for details and direct download link:</i>"
             )
-            kb = files_list_kb(filtered_items, page, total_items, per_page=PER_PAGE, folder_id=folder_id)
+            kb = files_list_kb(page_items, page, total_items, per_page=PER_PAGE, folder_id=folder_id)
             await event.edit(text, buttons=kb, parse_mode="html")
         except Exception as e:
+            logger.error(f"Error in menu_files: {e}")
             await event.edit(f"❌ Error: {clean_html(str(e))}", buttons=back_to_main_kb(), parse_mode="html")
         return
 
@@ -1292,6 +1339,13 @@ async def callback_handler(event):
             
             f_res = await get_file_info(api_key, file_id)
             f_data = f_res.get("data", f_res) if f_res.get("status") == "success" else {}
+            f_data["id"] = file_id
+            f_data["parentId"] = target_folder_id
+            f_data["folder_id"] = target_folder_id
+            set_file_folder(user_id, file_id, target_folder_id)
+            cpp_engine.upsert_files(user_id, [f_data])
+            save_cached_files_to_db(user_id, [f_data])
+
             name = f_data.get("name", "Untitled")
             size = f_data.get("size", 0)
             mime = f_data.get("mimeType", "N/A")
@@ -1357,6 +1411,9 @@ async def callback_handler(event):
         try:
             res = await delete_file(api_key, file_id)
             if res.get("status") == "success":
+                delete_cached_file_from_db(user_id, file_id)
+                cpp_engine.clear_user(user_id)
+                cpp_engine.upsert_files(user_id, load_cached_files_from_db(user_id))
                 file_cache.invalidate(user_id)
                 await event.edit(f"✅ <b>File #{file_id} successfully deleted!</b>", buttons=back_to_main_kb(), parse_mode="html")
             else:

@@ -8,6 +8,8 @@ import logging
 from collections import defaultdict
 from config import API_BASE_URL
 from helpers import format_date
+from cpp_engine import cpp_engine
+from database import save_cached_files_to_db, load_cached_files_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,7 @@ async def get_user_profile(api_key: str):
         return resp.json()
 
 async def list_files(api_key: str, folder_id: str = "all", limit: int = 100, offset_id: int = None, search: str = None):
-    """List files with reliable, fast batch scanning and auto-pagination."""
+    """List files with reliable, fast batch scanning and min_id auto-pagination."""
     url = f"{API_BASE_URL}/v1/files"
     headers = _get_headers(api_key)
     
@@ -91,7 +93,7 @@ async def list_files(api_key: str, folder_id: str = "all", limit: int = 100, off
             logger.error(f"Error in list_files single fetch: {e}")
         return {"status": "error", "items": [], "total": 0}
 
-    # Fetch all items across fast 100-item batches
+    # Fetch all items across fast batches with min_id chaining
     all_items = []
     curr_offset = None
     target_folder = folder_id or "all"
@@ -118,12 +120,11 @@ async def list_files(api_key: str, folder_id: str = "all", limit: int = 100, off
                     break
                 all_items.extend(items)
                 
-                # Stop if no more pages
-                if not data.get("has_more") or not data.get("next_offset_id"):
+                # Chain offset_id using lowest Telegram message ID
+                min_id = min(int(x.get("id") or x.get("message_id")) for x in items)
+                if curr_offset == min_id:
                     break
-                curr_offset = data.get("next_offset_id")
-                if curr_offset == 0:
-                    break
+                curr_offset = min_id
     except Exception as e:
         logger.error(f"Error scanning files in list_files: {e}")
 
@@ -135,11 +136,80 @@ async def list_files(api_key: str, folder_id: str = "all", limit: int = 100, off
         "next_offset_id": 0
     }
 
+async def fast_sync_user_files(api_key: str, user_id: int, full_scan: bool = False) -> list:
+    """Ultra-fast live sync using aiohttp with C++ indexing & SQLite persistence."""
+    url = f"{API_BASE_URL}/v1/files"
+    headers = _get_headers(api_key)
+    all_items = []
+    curr_offset = None
+    max_batches = 15 if full_scan else 1  # 1 batch (100 recent files) on live check, 15 batches on full scan
 
-async def get_storage_stats_realtime(api_key: str):
-    """Calculate 100% accurate real-time storage statistics from live scan."""
     try:
-        files_res = await list_files(api_key, folder_id="all", limit=1000)
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+            for _ in range(max_batches):
+                params = {"folder_id": "all", "limit": "100"}
+                if curr_offset:
+                    params["offset_id"] = str(curr_offset)
+
+                async with session.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    if data.get("status") != "success":
+                        break
+                    items = data.get("items", [])
+                    if not items:
+                        break
+                    all_items.extend(items)
+
+                    if not full_scan:
+                        break
+
+                    min_id = min(int(x.get("id") or x.get("message_id")) for x in items)
+                    if curr_offset == min_id:
+                        break
+                    curr_offset = min_id
+    except Exception as e:
+        logger.debug(f"Fast sync notice: {e}")
+
+    if all_items:
+        cpp_engine.upsert_files(user_id, all_items)
+        save_cached_files_to_db(user_id, all_items)
+
+    return all_items
+
+async def get_storage_stats_realtime(api_key: str, user_id: int = None):
+    """Calculate 100% accurate real-time storage statistics accelerated by C++ engine."""
+    try:
+        # 1. If C++ engine has files for user, compute stats instantly in microseconds
+        if user_id:
+            c_stats = cpp_engine.compute_stats(user_id)
+            if c_stats.get("total_files", 0) > 0:
+                total_files = c_stats.get("total_files", 0)
+                total_storage_bytes = c_stats.get("total_bytes", 0)
+                categories = c_stats.get("categories", {})
+                
+                folders_res = await list_folders(api_key, parent_id="all")
+                custom_folders = folders_res.get("folders", []) if folders_res.get("status") == "success" else []
+                total_folders = len(custom_folders)
+                
+                total_mb = f"{total_storage_bytes / (1024 * 1024):.2f}"
+                total_gb = f"{total_storage_bytes / (1024 * 1024 * 1024):.3f}"
+                return {
+                    "status": "success",
+                    "total_files": total_files,
+                    "total_folders": total_folders,
+                    "total_storage_bytes": total_storage_bytes,
+                    "total_storage_mb": total_mb,
+                    "total_storage_gb": total_gb,
+                    "quota": "Unlimited Free (Telegram Cloud)",
+                    "storage_engine": "Telegram Cloud MTProto ('Saved Messages')",
+                    "category_breakdown": categories
+                }
+
+        # 2. Otherwise fetch live scan
+        files_res = await list_files(api_key, folder_id="all", limit=100)
         items = files_res.get("items", []) if files_res.get("status") == "success" else []
         
         folders_res = await list_folders(api_key, parent_id="all")

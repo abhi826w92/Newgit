@@ -91,12 +91,20 @@ def init_db():
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bot_sessions (
-            session_key TEXT PRIMARY KEY,
-            session_data TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS cached_files (
+            file_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            size INTEGER DEFAULT 0,
+            mime_type TEXT DEFAULT '',
+            parent_id TEXT DEFAULT 'root',
+            created_at INTEGER DEFAULT 0,
+            starred INTEGER DEFAULT 0,
+            raw_json TEXT DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cached_files_user ON cached_files(user_id, parent_id);")
     
     # Auto-migrations for existing databases
     migrations = [
@@ -495,5 +503,97 @@ def get_user_session(user_id: int) -> str:
         if raw_session:
             return decrypt_api_key(raw_session)
     return ""
+
+def save_cached_files_to_db(user_id: int, files: list):
+    """Save/update a list of files into the cached_files SQLite table."""
+    if not files:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        data = []
+        for f in files:
+            fid = str(f.get("id") or f.get("message_id") or "")
+            if not fid:
+                continue
+            name = str(f.get("name", "Untitled"))
+            size = int(f.get("size", 0))
+            mime = str(f.get("mimeType") or f.get("mime_type") or "")
+            parent = str(f.get("parentId") or f.get("parent_id") or f.get("folder_id") or "root")
+            created_at = int(f.get("created_at") or f.get("date") or 0)
+            starred = 1 if f.get("starred") else 0
+            raw_json = json.dumps(f)
+            data.append((fid, int(user_id), name, size, mime, parent, created_at, starred, raw_json))
+
+        cursor.executemany("""
+            INSERT INTO cached_files (file_id, user_id, name, size, mime_type, parent_id, created_at, starred, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_id) DO UPDATE SET
+                name=excluded.name,
+                size=excluded.size,
+                mime_type=excluded.mime_type,
+                parent_id=excluded.parent_id,
+                created_at=excluded.created_at,
+                starred=excluded.starred,
+                raw_json=excluded.raw_json,
+                updated_at=CURRENT_TIMESTAMP
+        """, data)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving cached files to DB: {e}")
+    finally:
+        conn.close()
+
+def load_cached_files_from_db(user_id: int) -> list:
+    """Load all cached files for a user from SQLite database."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    files = []
+    try:
+        cursor.execute("SELECT raw_json, file_id, name, size, mime_type, parent_id, created_at, starred FROM cached_files WHERE user_id = ? ORDER BY CAST(file_id AS INTEGER) DESC", (int(user_id),))
+        rows = cursor.fetchall()
+        for r in rows:
+            if r["raw_json"]:
+                try:
+                    f_obj = json.loads(r["raw_json"])
+                    files.append(f_obj)
+                    continue
+                except Exception:
+                    pass
+            files.append({
+                "id": r["file_id"],
+                "name": r["name"],
+                "size": r["size"],
+                "mimeType": r["mime_type"],
+                "parentId": r["parent_id"],
+                "folder_id": r["parent_id"],
+                "created_at": r["created_at"],
+                "starred": bool(r["starred"])
+            })
+    except Exception as e:
+        logger.error(f"Error loading cached files from DB: {e}")
+    finally:
+        conn.close()
+    return files
+
+def delete_cached_file_from_db(user_id: int, file_id: str):
+    """Delete a single cached file from SQLite."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM cached_files WHERE file_id = ? AND user_id = ?", (str(file_id), int(user_id)))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error deleting cached file: {e}")
+    finally:
+        conn.close()
+
+# Auto-initialize database on import
+try:
+    init_db()
+except Exception as e:
+    logger.error(f"init_db notice: {e}")
+
+
 
 
