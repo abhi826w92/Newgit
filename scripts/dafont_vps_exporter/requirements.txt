@@ -1,0 +1,3 @@
+# Python dependencies (The scripts use standard library, but requests & tqdm can be installed if needed)
+requests>=2.31.0
+urllib3>=2.0.0
