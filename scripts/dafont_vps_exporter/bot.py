@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 import zipfile
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from telethon import TelegramClient
@@ -39,76 +39,7 @@ SESSION_NAME = "dafont_mtproto_bot"
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-# ----------------- TELETHON MTPROTO CLIENT -----------------
-g_tg_client = None
-
-async def init_tg_client():
-    global g_tg_client
-    if HAS_TELETHON:
-        print("[*] Connecting to Telegram Data Centers via MTProto Binary Protocol...")
-        g_tg_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-        await g_tg_client.start(bot_token=BOT_TOKEN)
-        me = await g_tg_client.get_me()
-        print(f"[✓] MTProto Connected! Bot: @{me.username} ({me.id}) - 2GB Upload Limit Active.")
-        return g_tg_client
-    return None
-
-def tg_send_message_sync(text):
-    print(f"\n[Telegram] {text}")
-    if g_tg_client and g_tg_client.is_connected():
-        loop = asyncio.get_event_loop()
-        try:
-            loop.run_until_complete(g_tg_client.send_message(CHAT_ID, text))
-            return True
-        except Exception as e:
-            print(f"[!] Telethon send message error: {e}")
-    
-    # Fallback to HTTP
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = json.dumps({"chat_id": CHAT_ID, "text": text}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode('utf-8'))
-    except Exception:
-        return None
-
-async def tg_upload_document_async(file_path, caption=""):
-    global g_tg_client
-    file_name = os.path.basename(file_path)
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"[*] [MTProto 2GB Stream] Uploading '{file_name}' ({file_size_mb:.2f} MB) to Channel {CHAT_ID}...")
-
-    last_pct = 0
-    def upload_callback(current, total):
-        nonlocal last_pct
-        pct = int(current * 100 / total)
-        if pct >= last_pct + 25 or pct == 100:
-            last_pct = pct
-            print(f"  [MTProto Upload] {pct}% ({current / (1024*1024):.1f} / {total / (1024*1024):.1f} MB)")
-
-    for attempt in range(1, 4):
-        try:
-            await g_tg_client.send_file(
-                CHAT_ID,
-                file_path,
-                caption=caption,
-                progress_callback=upload_callback,
-                attributes=[DocumentAttributeFilename(file_name)],
-                force_document=True
-            )
-            print(f"[✓] MTProto Successfully Uploaded '{file_name}' to Telegram!")
-            return True
-        except Exception as e:
-            print(f"[!] Upload attempt {attempt} failed: {e}")
-            await asyncio.sleep(3)
-    return False
-
-def tg_send_document_sync(file_path, caption=""):
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(tg_upload_document_async(file_path, caption))
-
-# ----------------- DATABASE WITH STATE RESUMPTION -----------------
+# ----------------- DATABASE -----------------
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -156,6 +87,48 @@ def is_letter_completed(letter):
 def mark_letter_completed(letter):
     set_meta(f"letter_{letter}_done", "true")
 
+# ----------------- TELEGRAM ASYNC MESSAGING & UPLOADING -----------------
+
+async def tg_send_message(client, text):
+    print(f"\n[Telegram] {text}")
+    if client and client.is_connected():
+        try:
+            await client.send_message(CHAT_ID, text)
+            return True
+        except Exception as e:
+            print(f"[!] MTProto send message error: {e}")
+    return False
+
+async def tg_send_document(client, file_path, caption=""):
+    file_name = os.path.basename(file_path)
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    print(f"[*] [MTProto 2GB Stream] Uploading '{file_name}' ({file_size_mb:.2f} MB) to Channel {CHAT_ID}...")
+
+    last_pct = 0
+    def upload_callback(current, total):
+        nonlocal last_pct
+        pct = int(current * 100 / total)
+        if pct >= last_pct + 25 or pct == 100:
+            last_pct = pct
+            print(f"  [MTProto Upload] {pct}% ({current / (1024*1024):.1f} / {total / (1024*1024):.1f} MB)")
+
+    for attempt in range(1, 4):
+        try:
+            await client.send_file(
+                CHAT_ID,
+                file_path,
+                caption=caption,
+                progress_callback=upload_callback,
+                attributes=[DocumentAttributeFilename(file_name)],
+                force_document=True
+            )
+            print(f"[✓] MTProto Successfully Uploaded '{file_name}' to Telegram!")
+            return True
+        except Exception as e:
+            print(f"[!] Upload attempt {attempt} failed: {e}")
+            await asyncio.sleep(3)
+    return False
+
 # ----------------- TURBO PARALLEL CRAWLER -----------------
 
 def crawl_alphabet_page(letter, page):
@@ -169,7 +142,7 @@ def crawl_alphabet_page(letter, page):
     except Exception:
         return page, []
 
-def crawl_single_letter_turbo(letter):
+async def crawl_single_letter_turbo(loop, executor, letter):
     if is_letter_completed(letter):
         print(f"[✓] Section '{letter}' is ALREADY completed. Skipping crawl.")
         return 0
@@ -187,8 +160,10 @@ def crawl_single_letter_turbo(letter):
 
     while True:
         pages_to_fetch = list(range(current_page, current_page + chunk_size))
-        with ThreadPoolExecutor(max_workers=CRAWL_THREADS) as executor:
-            page_results = list(executor.map(lambda p: crawl_alphabet_page(letter, p), pages_to_fetch))
+        
+        # Run parallel page requests in executor without blocking asyncio loop
+        tasks = [loop.run_in_executor(executor, crawl_alphabet_page, letter, p) for p in pages_to_fetch]
+        page_results = await asyncio.gather(*tasks)
 
         page_results.sort(key=lambda x: x[0])
         chunk_had_new = False
@@ -213,7 +188,7 @@ def crawl_single_letter_turbo(letter):
     print(f"[✓] Section '{letter}' Turbo Crawl Complete! Indexed {len(seen)} unique fonts (+{new_total} new).")
     return new_total
 
-# ----------------- TURBO PARALLEL DOWNLOADER (128 THREADS) -----------------
+# ----------------- PARALLEL STREAM DOWNLOADER -----------------
 
 def download_worker(slug, out_dir):
     url = f"https://dl.dafont.com/dl/?f={slug}"
@@ -237,7 +212,7 @@ def download_worker(slug, out_dir):
             time.sleep(0.1)
     return slug, False, 0
 
-def upload_and_clean_batch(batch_slugs, part_idx):
+async def upload_and_clean_batch(client, batch_slugs, part_idx):
     os.makedirs(BUNDLES_DIR, exist_ok=True)
     bundle_name = f"dafont_archive_part_{part_idx:04d}.zip"
     bundle_path = os.path.join(BUNDLES_DIR, bundle_name)
@@ -263,7 +238,8 @@ def upload_and_clean_batch(batch_slugs, part_idx):
     size_mb = os.path.getsize(bundle_path) / (1024 * 1024)
     caption = f"⚡ **DaFont MTProto Turbo Archive** [Part #{part_idx}]\n📦 Contains **{len(font_files)} font binaries** ({size_mb:.2f} MB)"
     
-    uploaded = tg_send_document_sync(bundle_path, caption)
+    # Direct async upload to Telegram via Telethon MTProto!
+    uploaded = await tg_send_document(client, bundle_path, caption)
     
     if uploaded:
         conn = sqlite3.connect(DB_PATH)
@@ -285,7 +261,7 @@ def upload_and_clean_batch(batch_slugs, part_idx):
         return True
     return False
 
-def process_section_fonts_turbo(letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
+async def process_section_fonts_turbo(client, loop, executor, letter, threads=MAX_THREADS, batch_size=BATCH_SIZE):
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     
     while True:
@@ -306,26 +282,31 @@ def process_section_fonts_turbo(letter, threads=MAX_THREADS, batch_size=BATCH_SI
         print(f"\n[*] Section '{letter}': Downloading {len(batch_slugs)} fonts with {threads} PARALLEL THREADS (Part #{part_idx})...")
         start_time = time.time()
 
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            future_to_slug = {executor.submit(download_worker, s, ARCHIVE_DIR): s for s in batch_slugs}
-            done_count = 0
-            for future in as_completed(future_to_slug):
-                slug, ok, font_count = future.result()
-                done_count += 1
-                if done_count % 100 == 0 or done_count == len(batch_slugs):
-                    elapsed = time.time() - start_time
-                    speed = done_count / elapsed if elapsed > 0 else 0
-                    print(f"  [Section {letter} | Part #{part_idx}] {done_count}/{len(batch_slugs)} downloaded ({speed:.1f} fonts/sec)...")
+        # Download batch concurrently in ThreadPoolExecutor without blocking event loop
+        tasks = [loop.run_in_executor(executor, download_worker, s, ARCHIVE_DIR) for s in batch_slugs]
+        download_results = await asyncio.gather(*tasks)
 
-        # Package and upload to Telegram via MTProto
-        upload_and_clean_batch(batch_slugs, part_idx)
-        time.sleep(1)
+        elapsed = time.time() - start_time
+        speed = len(batch_slugs) / elapsed if elapsed > 0 else 0
+        print(f"  [Section {letter} | Part #{part_idx}] {len(batch_slugs)} downloaded in {elapsed:.1f}s ({speed:.1f} fonts/sec)...")
+
+        # Package and upload to Telegram via MTProto natively!
+        await upload_and_clean_batch(client, batch_slugs, part_idx)
+        await asyncio.sleep(1)
 
 # ----------------- MASTER PIPELINE -----------------
 
 async def async_main():
     init_db()
-    await init_tg_client()
+
+    print("[*] Connecting to Telegram Data Centers via MTProto Binary Protocol...")
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    await client.start(bot_token=BOT_TOKEN)
+    me = await client.get_me()
+    print(f"[✓] MTProto Connected! Bot: @{me.username} ({me.id}) - 2GB Upload Limit Active.")
+
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=MAX_THREADS)
 
     letters = [chr(c) for c in range(ord('a'), ord('z') + 1)] + ['ot_1']
     
@@ -342,11 +323,11 @@ async def async_main():
     if completed_letters:
         print(f"\n[🔄 RESUME DETECTED] Completed Sections: {', '.join(completed_letters)}")
         print(f"[🔄 RESUME DETECTED] Last Uploaded Part: #{last_part}")
-        tg_send_message_sync(f"🔄 **VPS MTProto Auto-Resume Active!**\nCompleted: **{len(completed_letters)}/27 Sections** (Part #{last_part})\nResuming download stream on next pending section...")
+        await tg_send_message(client, f"🔄 **VPS MTProto Auto-Resume Active!**\nCompleted: **{len(completed_letters)}/27 Sections** (Part #{last_part})\nResuming download stream on next pending section...")
     else:
-        tg_send_message_sync("⚡ **DaFont MTProto 2GB Turbo Exporter Started!**\nDirect Data Center binary streams active. Delivering large archives...")
+        await tg_send_message(client, "⚡ **DaFont MTProto 2GB Turbo Exporter Started!**\nDirect Data Center binary streams active. Delivering large archives...")
 
-    # Process each letter sequentially
+    # Process each letter sequentially in native async pipeline
     for letter in letters:
         if is_letter_completed(letter):
             continue
@@ -355,21 +336,20 @@ async def async_main():
         print(f"  ▶ STARTING SECTION '{letter.upper()}' (Turbo Crawl ➔ 128-Thread Download ➔ MTProto Upload)")
         print(f"==========================================================")
         
-        # 1. Turbo Crawl (parallel 32 threads)
-        crawl_single_letter_turbo(letter)
+        # 1. Turbo Crawl
+        await crawl_single_letter_turbo(loop, executor, letter)
 
         # 2. Turbo Download (128 parallel threads) & MTProto Direct Upload
-        process_section_fonts_turbo(letter, MAX_THREADS, BATCH_SIZE)
+        await process_section_fonts_turbo(client, loop, executor, letter, MAX_THREADS, BATCH_SIZE)
 
     print("\n" + "=" * 65)
     print(" 🎉 ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT VIA MTPROTO!")
     print("=" * 65)
-    tg_send_message_sync("🎉 **ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT TO TELEGRAM!**\nAll VPS storage wiped 100% clean.")
+    await tg_send_message(client, "🎉 **ALL 27 DAFONT SECTIONS FULLY EXPORTED & SENT TO TELEGRAM!**\nAll VPS storage wiped 100% clean.")
+    await client.disconnect()
 
 def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(async_main())
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()
