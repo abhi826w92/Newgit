@@ -4,7 +4,6 @@
     7251749429
   ],
   "active_scripts": [
-    "tgdriveapi-python (3)/app.py",
     "Ghidrabot vps/bot.py",
     "xxtgdriveapibot/main.py",
     "dafont_vps_exporter/bot.py"
