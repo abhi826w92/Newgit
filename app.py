@@ -1369,109 +1369,38 @@ def wait_for_warm_handshake(max_wait_seconds=45):
     return True
 
 
-def execute_relay_handoff_sequence(reason="5.5 Hours reached"):
+def execute_relay_handoff_sequence(reason="Manual Shutdown"):
     """
-    Executes the Zero-Downtime 5.5-hour relay handoff sequence:
+    Clean server shutdown sequence:
     1. Checkpoints and flushes all SQLite database WAL files
     2. Records active running scripts to bot_config.json
     3. Syncs and pushes repository changes to GitHub
-    4. Triggers the next runner phase with retries
-    5. Warm Handshake: Keeps scripts alive during bootstrap (~30-45s) for 0% downtime
-    6. Handles failures gracefully without killing active scripts abruptly
+    4. Cleanly stops child scripts without auto-dispatching new runners
     """
     global IS_RUNNING
-    logger.info(f"⏳ Starting Zero-Downtime Relay Handoff Sequence ({reason})...")
+    IS_RUNNING = False
+    logger.info(f"🛑 Clean Server Shutdown ({reason}). Auto-restart is disabled.")
 
     active_now = list(get_active_running_processes().keys())
     config["active_scripts"] = active_now
     save_config(config)
 
-    resume_note = ""
-    if active_now:
-        resume_note = f"\n🚀 <i>{len(active_now)} active scripts will auto-resume in new phase:</i>\n" + "\n".join([f"• <code>{s}</code>" for s in active_now])
-
     notify_all_admins(
-        f"🔄 <b>Relay Transition ({reason}):</b>\n"
-        "Backing up workspace and transitioning to next runner..."
-        + resume_note
+        f"🛑 <b>Server Stopped ({reason}):</b>\n"
+        "Workspace data and databases have been safely backed up to GitHub.\n"
+        "💡 <i>Auto-restart is disabled. The workflow will only run when you manually start it.</i>"
     )
 
     # 1. Flush SQLite databases to guarantee zero corruption
     flush_all_sqlite_databases()
 
     # 2. Push workspace changes to GitHub
-    sync_ok, sync_msg = git_sync_to_github(f"Auto-backup before Relay Handoff ({reason})")
-    if not sync_ok:
-        logger.warning(f"Initial sync warning: {sync_msg}. Retrying in 2 seconds...")
-        time.sleep(2)
-        git_sync_to_github(f"Auto-backup retry before Relay Handoff ({reason})")
+    git_sync_to_github(f"Final workspace backup on clean shutdown ({reason})")
 
-    # 3. Multi-attempt retry loop to dispatch next runner
-    handoff_ok = False
-    last_err = ""
-    for attempt in range(1, 6):
-        logger.info(f"🔄 Triggering next runner (attempt {attempt}/5)...")
-        ok, msg = trigger_next_runner_detailed()
-        if ok:
-            handoff_ok = True
-            logger.info(f"✅ Next runner successfully triggered on attempt {attempt}: {msg}")
-            notify_all_admins(
-                f"✅ <b>Relay Transition Dispatched (Zero-Downtime):</b>\n"
-                f"New runner initiated successfully (attempt {attempt}/5).\n"
-                f"🤝 <i>Warm Handshake active: scripts remain live while new runner boots (~30s).</i>"
-            )
-            break
-        else:
-            last_err = msg
-            logger.error(f"Handoff trigger attempt {attempt} failed: {msg}")
-            time.sleep(5)
-
-    if handoff_ok:
-        # Zero-Downtime Overlap: Keep child scripts alive while new runner prepares
-        wait_for_warm_handshake(max_wait_seconds=40)
-        IS_RUNNING = False
-        stop_child_app(script_name=None, clear_active=False)
-        time.sleep(3)
-        logger.info("Warm Handshake handoff sequence complete. Exiting cleanly.")
-        sys.exit(0)
-    else:
-        logger.error(f"❌ Relay handoff failed after 5 attempts: {last_err}")
-        err_guide = ""
-        if "403" in last_err or "Resource not accessible" in last_err or not GH_PAT:
-            err_guide = (
-                "\n\n🔑 <b>Cause:</b> Missing or invalid <code>GH_PAT</code> repository secret.\n"
-                "GitHub Actions blocks default <code>GITHUB_TOKEN</code> from self-triggering workflows.\n"
-                "<b>Fix:</b> Add a GitHub Personal Access Token as secret <code>GH_PAT</code> with <code>workflow</code> & <code>repo</code> permissions in Repo Settings."
-            )
-
-        notify_all_admins(
-            f"❌ <b>Relay Auto-Restart Failed:</b>\n"
-            f"Error: <code>{html.escape(last_err[:250])}</code>"
-            f"{err_guide}\n\n"
-            f"⚠️ <i>Old runner and active scripts remain running. Please configure GH_PAT or trigger workflow manually.</i>",
-            reply_markup={
-                "inline_keyboard": [
-                    [{"text": "🔄 Retry Handoff Now", "callback_data": "menu_force_handoff"}],
-                    [{"text": "📊 Dashboard", "callback_data": "menu_main"}]
-                ]
-            }
-        )
-
-        # Background retry thread (attempts every 60s without blocking)
-        def background_retry_loop():
-            for retry_i in range(1, 15):
-                time.sleep(60)
-                if not IS_RUNNING:
-                    break
-                logger.info(f"Background retry {retry_i} for relay handoff...")
-                ok, msg = trigger_next_runner_detailed()
-                if ok:
-                    notify_all_admins(f"✅ <b>Relay Handoff Succeeded on Background Retry #{retry_i}!</b> Transitioning to new runner...")
-                    stop_child_app(script_name=None, clear_active=False)
-                    time.sleep(5)
-                    sys.exit(0)
-
-        threading.Thread(target=background_retry_loop, daemon=True, name="HandoffRetryThread").start()
+    # 3. Cleanly stop child apps and exit
+    stop_child_app(script_name=None, clear_active=False)
+    time.sleep(2)
+    sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # Visual UI & Keyboards
@@ -4834,16 +4763,14 @@ def main():
     tg_thread = threading.Thread(target=telegram_polling_loop, daemon=True, name="TGPolling")
     tg_thread.start()
     
-    # Watchdog loop for 5.5 hours duration
-    while IS_RUNNING:
-        elapsed = time.time() - START_TIME
-        if elapsed >= RUN_DURATION_SECONDS:
-            logger.info("⏳ 5.5 Hours reached. Triggering Relay Handoff...")
-            break
-        time.sleep(5)
-    
-    # --- HANDOFF SEQUENCE ---
-    execute_relay_handoff_sequence("5.5 Hours reached")
+    # Main server loop: runs until stopped by user or terminated
+    try:
+        while IS_RUNNING:
+            time.sleep(2)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+
+    execute_relay_handoff_sequence("Server stopped by user")
 
 if __name__ == "__main__":
     main()
