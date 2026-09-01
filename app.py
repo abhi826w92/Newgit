@@ -4763,14 +4763,39 @@ def main():
     tg_thread = threading.Thread(target=telegram_polling_loop, daemon=True, name="TGPolling")
     tg_thread.start()
     
-    # Main server loop: runs until stopped by user or terminated
+    # Watchdog loop: runs for 5.5 hours, sends alert 30 min before stopping, and cleanly exits without auto-restart
+    warn_30m_sent = False
     try:
         while IS_RUNNING:
-            time.sleep(2)
+            elapsed = time.time() - START_TIME
+            remaining = RUN_DURATION_SECONDS - elapsed
+
+            # 1. 📢 30-Minute Prior Alert before shutdown
+            if not warn_30m_sent and remaining <= 1800 and elapsed > 60:
+                warn_30m_sent = True
+                notify_all_admins(
+                    "⚠️ <b>Server Expiry Warning (30 Minutes Remaining)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "⏳ <b>Server Uptime:</b> <code>5.0 Hours</code>\n"
+                    "🛑 <b>Scheduled Shutdown in:</b> <code>30 Minutes</code>\n\n"
+                    "💡 <i>Auto-restart is disabled. The workflow will stop cleanly at 5.5 hours. All databases and active scripts will be safely saved to GitHub.</i>",
+                    reply_markup={
+                        "inline_keyboard": [
+                            [{"text": "📊 Open Dashboard", "callback_data": "menu_main"}]
+                        ]
+                    }
+                )
+
+            # 2. 🛑 5.5 Hours Reached: Clean stop without auto-restart
+            if elapsed >= RUN_DURATION_SECONDS:
+                logger.info("⏳ 5.5 Hours limit reached. Performing clean shutdown without auto-restart...")
+                break
+
+            time.sleep(5)
     except (KeyboardInterrupt, SystemExit):
         pass
 
-    execute_relay_handoff_sequence("Server stopped by user")
+    execute_relay_handoff_sequence("5.5 Hours reached")
 
 if __name__ == "__main__":
     main()
