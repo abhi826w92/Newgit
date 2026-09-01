@@ -565,13 +565,17 @@ def child_watchdog(proc, fname):
     is_stopped = pdata.get("is_stopped", False)
     
     running_processes.pop(fname, None)
-    active_scripts = list(get_active_running_processes().keys())
-    config["active_scripts"] = active_scripts
-    save_config(config)
 
-    # If stopped intentionally by admin or terminated via SIGKILL/SIGTERM, skip crash alert
-    if is_stopped or ret in [-9, -15, 137, 143]:
-        logger.info(f"Process {fname} stopped cleanly by admin (Exit code: {ret}).")
+    # CRITICAL FIX: Only update config["active_scripts"] if process exited normally on its own during active runtime.
+    # NEVER overwrite or shrink active_scripts during server shutdown, handoff, or SIGTERM/SIGKILL termination!
+    if IS_RUNNING and not is_stopped and ret not in [-9, -15, 137, 143, -2, 2]:
+        active_scripts = list(get_active_running_processes().keys())
+        config["active_scripts"] = active_scripts
+        save_config(config)
+
+    # If stopped intentionally by admin or terminated via SIGKILL/SIGTERM/shutdown, skip crash alert
+    if is_stopped or not IS_RUNNING or ret in [-9, -15, 137, 143, -2, 2]:
+        logger.info(f"Process {fname} stopped cleanly (Exit code: {ret}).")
         return
     
     recent_err = "\n".join(pdata.get("logs", [])[-20:]) if pdata.get("logs") else "(No output recorded)"
@@ -4750,6 +4754,10 @@ def main():
             success_count = 0
             for s in scripts_to_run:
                 ok, msg = start_child_app(s)
+                if not ok:
+                    # Retry once after 2.5s (handles virtualenv / pip site-packages lock)
+                    time.sleep(2.5)
+                    ok, msg = start_child_app(s)
                 if ok:
                     success_count += 1
                 else:
