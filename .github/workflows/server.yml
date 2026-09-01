@@ -5,8 +5,8 @@ on:
   repository_dispatch:
     types: [relay-handoff, auto-restart, ping]
   schedule:
-    # Fallback cron trigger (every 30 minutes to restart if runner terminates)
-    - cron: '*/30 * * * *'
+    # Safety fallback trigger every 6 hours (in case runner terminates unexpectedly)
+    - cron: '0 */6 * * *'
 
 # Ensure ONLY ONE active runner at all times (auto-kills stale runners)
 concurrency:
