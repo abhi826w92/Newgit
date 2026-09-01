@@ -2510,9 +2510,72 @@ def prompt_stop_menu(chat_id, user_id, message_id=None):
     else:
         send_tg_message(chat_id, text, reply_markup=markup)
 
-def show_server_info_view(chat_id, message_id=None):
+def get_github_actions_monthly_quota(owner_login):
+    """
+    Retrieves real-time GitHub Actions monthly usage quota for private repositories.
+    GitHub Free tier includes 2,000 private runner minutes / month.
+    """
+    total_quota = 2000
+    used_mins = 0
+    now_dt = datetime.datetime.utcnow()
+    
     try:
-        # Fetch repository details via GitHub API (with safe timeout & fallback)
+        month_start_iso = f"{now_dt.year}-{now_dt.month:02d}-01T00:00:00Z"
+        url = f"https://api.github.com/repos/{REPO}/actions/runs?created=>={month_start_iso}&per_page=100"
+        headers = {"Accept": "application/vnd.github+json"}
+        if EFFECTIVE_TOKEN:
+            headers["Authorization"] = f"Bearer {EFFECTIVE_TOKEN}"
+            
+        r = requests.get(url, headers=headers, timeout=4)
+        if r.status_code == 200:
+            runs_data = r.json().get("workflow_runs", [])
+            total_seconds = 0
+            for run in runs_data:
+                created_str = run.get("created_at")
+                updated_str = run.get("updated_at")
+                if created_str and updated_str:
+                    try:
+                        t1 = datetime.datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                        t2 = datetime.datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+                        diff_sec = max(0, int((t2 - t1).total_seconds()))
+                        total_seconds += diff_sec
+                    except Exception:
+                        pass
+            current_uptime = int(time.time() - START_TIME)
+            total_seconds += current_uptime
+            used_mins = max(1, total_seconds // 60)
+    except Exception as e:
+        logger.debug(f"Actions quota calculation fallback: {e}")
+        used_mins = max(1, int(time.time() - START_TIME) // 60)
+
+    try:
+        if now_dt.month == 12:
+            next_reset = datetime.date(now_dt.year + 1, 1, 1)
+        else:
+            next_reset = datetime.date(now_dt.year, now_dt.month + 1, 1)
+        reset_str = next_reset.strftime("%d %b %Y")
+    except Exception:
+        reset_str = "1st of Next Month"
+
+    remaining_mins = max(0, total_quota - used_mins)
+    pct_used = min(100.0, (used_mins / total_quota) * 100.0)
+    pct_remain = max(0.0, 100.0 - pct_used)
+
+    return {
+        "total_quota": total_quota,
+        "used_mins": used_mins,
+        "remaining_mins": remaining_mins,
+        "pct_used": pct_used,
+        "pct_remain": pct_remain,
+        "reset_date": reset_str
+    }
+
+def show_server_info_view(chat_id, message_id=None):
+    """
+    Renders an enhanced, real-time Cloud Server & Repository Information view
+    including GitHub Actions monthly time limits for private repos.
+    """
+    try:
         repo_info = {}
         token_to_use = EFFECTIVE_TOKEN
         try:
@@ -2531,9 +2594,9 @@ def show_server_info_view(chat_id, message_id=None):
         hours, remainder = divmod(uptime_sec, 3600)
         minutes, seconds = divmod(remainder, 60)
         
-        relay_remain = max(0, RUN_DURATION_SECONDS - uptime_sec)
-        rh, rr = divmod(relay_remain, 3600)
-        rm, rs = divmod(rr, 60)
+        limit_remain = max(0, RUN_DURATION_SECONDS - uptime_sec)
+        lh, lr = divmod(limit_remain, 3600)
+        lm, ls = divmod(lr, 60)
         
         active = get_active_running_processes()
         count = len(active)
@@ -2543,7 +2606,8 @@ def show_server_info_view(chat_id, message_id=None):
             active_summary = f"🟢 <b>{count} Active:</b> " + ", ".join([f"<code>{s}</code>" for s in sorted(active.keys())])
         
         repo_name = repo_info.get("full_name") if isinstance(repo_info.get("full_name"), str) else REPO
-        visibility = "🌍 Public" if not repo_info.get("private", False) else "🔒 Private"
+        is_private = repo_info.get("private", True)
+        visibility = "🔒 Private Repo" if is_private else "🌍 Public Repo"
         repo_size_kb = repo_info.get("size", 0)
         default_branch = repo_info.get("default_branch") if isinstance(repo_info.get("default_branch"), str) else "main"
         created_at = repo_info.get("created_at", "N/A")[:10] if repo_info.get("created_at") else "N/A"
@@ -2558,30 +2622,33 @@ def show_server_info_view(chat_id, message_id=None):
         if isinstance(repo_info.get("html_url"), str) and repo_info["html_url"].startswith("http"):
             repo_html_url = repo_info["html_url"]
 
-        # Relay Status Diagnostic
-        if GH_PAT:
-            relay_status_str = "🟢 <b>Ready & Verified</b> (<code>GH_PAT</code> active)"
-        else:
-            relay_status_str = "⚠️ <b>Action Required</b> (Missing <code>GH_PAT</code> secret)"
-        
+        quota = get_github_actions_monthly_quota(owner_login)
+        quota_icon = "🟢" if quota["pct_remain"] > 30 else ("🟡" if quota["pct_remain"] > 10 else "🔴")
+
         text = (
             "ℹ️ <b>Cloud Server & Repository Intelligence</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌐 <b>Cloud Repository:</b> <code>{repo_name}</code>\n"
+            f"🌐 <b>Repository:</b> <code>{repo_name}</code>\n"
             f"👑 <b>Owner:</b> <code>{owner_login}</code>\n"
             f"🛡️ <b>Visibility:</b> <b>{visibility}</b>\n"
             f"🌿 <b>Default Branch:</b> <code>{default_branch}</code>\n"
             f"📦 <b>Repo Size:</b> <code>{repo_size_kb} KB</code>\n"
             f"📅 <b>Created On:</b> <code>{created_at}</code>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚡ <b>Live Relay Server Status:</b>\n"
-            f"• <b>Daemon Status:</b> 🟢 <b>Active & Healthy</b>\n"
-            f"• <b>Relay Auto-Restart:</b> {relay_status_str}\n"
+            "⏱️ <b>Monthly Private Actions Time Limit (Real-Time):</b>\n"
+            f"• 📊 <b>Monthly Free Quota:</b> <code>2,000 Mins / Month</code>\n"
+            f"• ⏳ <b>Used This Month:</b> <code>{quota['used_mins']} Mins</code> ({quota['pct_used']:.1f}%)\n"
+            f"• {quota_icon} <b>Remaining Balance:</b> <code>{quota['remaining_mins']} Mins</code> ({quota['pct_remain']:.1f}%)\n"
+            f"• 🔄 <b>Cycle Resets On:</b> <code>{quota['reset_date']}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ <b>Live Server Status:</b>\n"
+            "• <b>Daemon Status:</b> 🟢 <b>Active & Healthy</b>\n"
+            "• <b>Auto-Restart:</b> 🛑 <b>Disabled (Manual Run Control)</b>\n"
             f"• <b>Active Scripts:</b> {active_summary}\n"
             f"• <b>Current Run ID:</b> <code>#{RUN_ID}</code>\n"
-            f"• <b>Current Phase Uptime:</b> <code>{hours}h {minutes}m {seconds}s</code>\n"
-            f"• <b>Next Relay Handoff In:</b> <code>{rh}h {rm}m {rs}s</code> (Auto-Resuming)\n"
-            f"• <b>Security Vault:</b> 🔐 <b>AES-256 Authenticated Encryption (Active)</b>\n"
+            f"• <b>Current Uptime:</b> <code>{hours}h {minutes}m {seconds}s</code>\n"
+            f"• <b>Scheduled Stop In:</b> <code>{lh}h {lm}m {ls}s</code> (30m Alert Active)\n"
+            f"• <b>Security Vault:</b> 🔐 <b>AES-256 Authenticated Encryption</b>\n"
             f"• <b>Secret Scanner Shield:</b> 🛡️ <b>100% Protected (.gitignore active)</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━"
         )
@@ -2590,10 +2657,6 @@ def show_server_info_view(chat_id, message_id=None):
             "inline_keyboard": [
                 [
                     {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
-                    {"text": "🧪 Test Relay Handoff", "callback_data": "menu_test_handoff"}
-                ],
-                [
-                    {"text": "⚡ Trigger Handoff Now", "callback_data": "menu_force_handoff_confirm"},
                     {"text": "🌐 Open on GitHub", "url": repo_html_url}
                 ],
                 [
@@ -2609,6 +2672,13 @@ def show_server_info_view(chat_id, message_id=None):
             edit_tg_message(chat_id, message_id, text, reply_markup=markup)
         else:
             send_tg_message(chat_id, text, reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Failed to render server info view: {e}")
+        fallback_text = f"ℹ️ <b>Server Info:</b>\n• <b>Uptime:</b> Active\n• <b>Repo:</b> <code>{REPO}</code>\n• <b>Run ID:</b> <code>#{RUN_ID}</code>"
+        if message_id:
+            edit_tg_message(chat_id, message_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
+        else:
+            send_tg_message(chat_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
     except Exception as e:
         logger.error(f"Failed to render server info view: {e}")
         fallback_text = f"ℹ️ <b>Server Info:</b>\n• <b>Uptime:</b> Active\n• <b>Repo:</b> <code>{REPO}</code>\n• <b>Run ID:</b> <code>#{RUN_ID}</code>"
@@ -4724,8 +4794,9 @@ def main():
     # Seamless Multi-Script Relay Persistence: Auto-resume active scripts
     active_list = config.get("active_scripts")
     
-    # If active_scripts is empty or uninitialized, auto-detect runnable projects & scripts in scripts/
-    if not active_list:
+    # CRITICAL FIX: If active_list is already a list (even if empty []), strictly respect user selection!
+    # ONLY auto-detect if active_scripts was NEVER initialized (None, first ever run).
+    if active_list is None:
         active_list = []
         if config.get("active_script"):
             active_list = [config["active_script"]]
@@ -4741,6 +4812,8 @@ def main():
                 elif it.endswith(".py"):
                     if is_runnable_entry_point(it) and it not in active_list:
                         active_list.append(it)
+        config["active_scripts"] = active_list
+        save_config(config)
 
     if active_list:
         logger.info(f"🔄 Auto-resuming {len(active_list)} active scripts across relay handoff/boot: {active_list}")
