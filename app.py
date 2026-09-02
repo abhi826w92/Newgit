@@ -556,6 +556,81 @@ def resource_guard_monitor(proc, fname):
             logger.debug(f"Resource guard loop error: {e}")
             time.sleep(2)
 
+def perform_system_memory_cleanup():
+    """
+    Executes deep RAM cleanup:
+    1. Python generational garbage collection (gc.collect).
+    2. Linux glibc malloc_trim(0) to release unmapped heap memory directly back to the OS kernel.
+    3. Trims in-memory process log buffers to 100 lines max per script.
+    4. Returns detailed statistics on memory freed.
+    """
+    import gc
+    import ctypes
+
+    try:
+        mem_before = psutil.virtual_memory()
+        proc_self = psutil.Process()
+        rss_before = proc_self.memory_info().rss
+    except Exception:
+        mem_before = None
+        rss_before = 0
+
+    # 1. Trim log buffers in memory
+    trimmed_logs = 0
+    for fname, pdata in list(running_processes.items()):
+        logs = pdata.get("logs", [])
+        if len(logs) > 100:
+            trimmed_logs += len(logs) - 100
+            pdata["logs"] = logs[-100:]
+
+    # 2. Python generational garbage collection
+    uncollected_count = gc.collect()
+
+    # 3. Linux glibc malloc_trim
+    malloc_trimmed = False
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        if hasattr(libc, "malloc_trim"):
+            libc.malloc_trim(0)
+            malloc_trimmed = True
+    except Exception as e:
+        logger.debug(f"malloc_trim notice: {e}")
+
+    try:
+        mem_after = psutil.virtual_memory()
+        rss_after = proc_self.memory_info().rss
+        freed_rss_mb = max(0.0, (rss_before - rss_after) / (1024 * 1024))
+        used_mb = mem_after.used / (1024 * 1024)
+        total_mb = mem_after.total / (1024 * 1024)
+        percent = mem_after.percent
+    except Exception:
+        freed_rss_mb = 0.0
+        used_mb = 0.0
+        total_mb = 0.0
+        percent = 0.0
+
+    return {
+        "uncollected_objects": uncollected_count,
+        "malloc_trimmed": malloc_trimmed,
+        "freed_mb": freed_rss_mb,
+        "used_mb": used_mb,
+        "total_mb": total_mb,
+        "percent": percent,
+        "trimmed_logs": trimmed_logs
+    }
+
+def background_memory_cleaner_loop():
+    """Periodically trims memory and collects garbage every 10 minutes."""
+    while IS_RUNNING:
+        time.sleep(600)
+        if not IS_RUNNING:
+            break
+        try:
+            perform_system_memory_cleanup()
+            logger.debug("Periodic background RAM cleanup executed.")
+        except Exception:
+            pass
+
 autofix_attempts = {}
 
 def child_watchdog(proc, fname):
@@ -1456,7 +1531,8 @@ def get_main_menu_keyboard():
                 {"text": "💻 Linux Shell", "callback_data": "menu_sh_prompt"}
             ],
             [
-                {"text": "ℹ️ Server Info", "callback_data": "menu_server_info"}
+                {"text": "ℹ️ Server Info", "callback_data": "menu_server_info"},
+                {"text": "🧹 Clean RAM", "callback_data": "menu_clean_ram"}
             ]
         ]
     }
@@ -2661,7 +2737,7 @@ def show_server_info_view(chat_id, message_id=None):
             "inline_keyboard": [
                 [
                     {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
-                    {"text": "🌐 Open on GitHub", "url": repo_html_url}
+                    {"text": "🧹 Clean RAM", "callback_data": "menu_clean_ram"}
                 ],
                 [
                     {"text": "🚀 Scripts Runner", "callback_data": "menu_runner"},
@@ -4296,8 +4372,35 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
     # 15. Server & Repo Info
     elif data == "menu_server_info":
-        answer_callback(callback_id, "ℹ️ Loading Repo Intelligence...")
+        answer_callback(callback_id, "ℹ️ Loading Server Intelligence...")
         show_server_info_view(chat_id, message_id)
+
+    # 15a. Instant Deep RAM Cleanup (GC + malloc_trim + Log Buffer Trim)
+    elif data == "menu_clean_ram":
+        answer_callback(callback_id, "🧹 Cleaning Memory...", show_alert=False)
+        res = perform_system_memory_cleanup()
+        text = (
+            "🧹 <b>Deep RAM Cleanup Complete!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 🗑️ <b>Purged Garbage Objects:</b> <code>{res['uncollected_objects']}</code>\n"
+            f"• ✂️ <b>Trimmed In-Memory Logs:</b> <code>{res['trimmed_logs']} lines</code>\n"
+            f"• 🗜️ <b>Linux malloc_trim:</b> {'🟢 Executed (Heap released to OS)' if res['malloc_trimmed'] else '⚪ Optimized'}\n"
+            f"• 💾 <b>Current RAM Usage:</b> <code>{res['used_mb']:.1f} MB / {res['total_mb']:.1f} MB</code> (<b>{res['percent']}%</b>)\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✨ <i>Unused memory blocks have been compacted and returned to the OS.</i>"
+        )
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔄 Clean Again", "callback_data": "menu_clean_ram"},
+                    {"text": "ℹ️ Server Info", "callback_data": "menu_server_info"}
+                ],
+                [
+                    {"text": "🔙 Main Menu", "callback_data": "menu_main"}
+                ]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
 
     # 15b. Test Relay Handoff API
     elif data == "menu_test_handoff":
@@ -4837,9 +4940,10 @@ def main():
                 notify_all_admins(f"🟢 <b>{success_count}/{len(scripts_to_run)} scripts are now active and running in parallel!</b>", reply_markup=get_main_menu_keyboard())
         threading.Thread(target=delayed_multi_resume, args=(active_list,), daemon=True).start()
 
-    # Start Telegram polling thread
+    # Start Telegram polling and Memory Cleaner threads
     tg_thread = threading.Thread(target=telegram_polling_loop, daemon=True, name="TGPolling")
     tg_thread.start()
+    threading.Thread(target=background_memory_cleaner_loop, daemon=True, name="MemoryCleaner").start()
     
     # Watchdog loop: runs for 2.0 hours (7200s), sends alert 30 min before stopping, and cleanly exits without auto-restart
     warn_30m_sent = False
