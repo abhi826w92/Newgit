@@ -14,7 +14,7 @@ jobs:
   relay_runner:
     name: Execute Relay Server
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 130
 
     steps:
       - name: Checkout Code
@@ -46,7 +46,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           WORKFLOW_FILE: "server.yml"
           WORKFLOW_REF: ${{ github.ref_name || 'main' }}
-          # Run duration: 330 minutes (5.5 hours) before graceful handoff
-          RUN_DURATION_SECONDS: "19800"
+          # Run duration: 120 minutes (2.0 hours) before clean stop
+          RUN_DURATION_SECONDS: "7200"
         run: |
           python app.py

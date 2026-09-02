@@ -44,8 +44,8 @@ RUN_ID = os.environ.get("GITHUB_RUN_ID", "local-dev").strip()
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "server.yml").strip()
 WORKFLOW_REF = os.environ.get("WORKFLOW_REF", "main").strip()
 
-# Default run duration: 5.5 hours (19800 seconds)
-RUN_DURATION_SECONDS = int(os.environ.get("RUN_DURATION_SECONDS", "19800"))
+# Default run duration: 2.0 hours (7200 seconds)
+RUN_DURATION_SECONDS = int(os.environ.get("RUN_DURATION_SECONDS", "7200"))
 START_TIME = time.time()
 IS_RUNNING = True
 
@@ -2510,182 +2510,36 @@ def prompt_stop_menu(chat_id, user_id, message_id=None):
     else:
         send_tg_message(chat_id, text, reply_markup=markup)
 
-def get_github_actions_monthly_quota(owner_login):
-    """
-    Retrieves real-time GitHub Actions monthly usage quota for private repositories.
-    GitHub Free tier includes 2,000 private runner minutes / month.
-    """
-    total_quota = 2000
-    used_mins = 0
-    now_dt = datetime.datetime.utcnow()
-    
-    try:
-        month_start_iso = f"{now_dt.year}-{now_dt.month:02d}-01T00:00:00Z"
-        url = f"https://api.github.com/repos/{REPO}/actions/runs?created=>={month_start_iso}&per_page=100"
-        headers = {"Accept": "application/vnd.github+json"}
-        if EFFECTIVE_TOKEN:
-            headers["Authorization"] = f"Bearer {EFFECTIVE_TOKEN}"
-            
-        r = requests.get(url, headers=headers, timeout=4)
-        if r.status_code == 200:
-            runs_data = r.json().get("workflow_runs", [])
-            total_seconds = 0
-            for run in runs_data:
-                created_str = run.get("created_at")
-                updated_str = run.get("updated_at")
-                if created_str and updated_str:
-                    try:
-                        t1 = datetime.datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                        t2 = datetime.datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
-                        diff_sec = max(0, int((t2 - t1).total_seconds()))
-                        total_seconds += diff_sec
-                    except Exception:
-                        pass
-            current_uptime = int(time.time() - START_TIME)
-            total_seconds += current_uptime
-            used_mins = max(1, total_seconds // 60)
-    except Exception as e:
-        logger.debug(f"Actions quota calculation fallback: {e}")
-        used_mins = max(1, int(time.time() - START_TIME) // 60)
-
-    try:
-        if now_dt.month == 12:
-            next_reset = datetime.date(now_dt.year + 1, 1, 1)
-        else:
-            next_reset = datetime.date(now_dt.year, now_dt.month + 1, 1)
-        reset_str = next_reset.strftime("%d %b %Y")
-    except Exception:
-        reset_str = "1st of Next Month"
-
-    remaining_mins = max(0, total_quota - used_mins)
-    pct_used = min(100.0, (used_mins / total_quota) * 100.0)
-    pct_remain = max(0.0, 100.0 - pct_used)
-
-    return {
-        "total_quota": total_quota,
-        "used_mins": used_mins,
-        "remaining_mins": remaining_mins,
-        "pct_used": pct_used,
-        "pct_remain": pct_remain,
-        "reset_date": reset_str
-    }
-
 def show_server_info_view(chat_id, message_id=None):
     """
-    Renders an enhanced, real-time Cloud Server & Repository Information view
-    including GitHub Actions monthly time limits for private repos.
+    Renders the clean, minimal Server Info view requested by admin:
+    ℹ️ Server Info:
+    • Uptime: Active
+    • Repo: abhi826w92/Newgit
+    • Run ID: #33637532261
     """
-    try:
-        repo_info = {}
-        token_to_use = EFFECTIVE_TOKEN
-        try:
-            url = f"https://api.github.com/repos/{REPO}"
-            headers = {"Accept": "application/vnd.github+json"}
-            if token_to_use:
-                headers["Authorization"] = f"Bearer {token_to_use}"
-            resp = requests.get(url, headers=headers, timeout=4)
-            if resp.status_code == 200:
-                repo_info = resp.json()
-        except Exception as e:
-            logger.debug(f"GitHub API info query: {e}")
-
-        # Telemetry
-        uptime_sec = int(time.time() - START_TIME)
-        hours, remainder = divmod(uptime_sec, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        limit_remain = max(0, RUN_DURATION_SECONDS - uptime_sec)
-        lh, lr = divmod(limit_remain, 3600)
-        lm, ls = divmod(lr, 60)
-        
-        active = get_active_running_processes()
-        count = len(active)
-        if count == 0:
-            active_summary = "🔴 <i>None (Stopped / Standby)</i>"
-        else:
-            active_summary = f"🟢 <b>{count} Active:</b> " + ", ".join([f"<code>{s}</code>" for s in sorted(active.keys())])
-        
-        repo_name = repo_info.get("full_name") if isinstance(repo_info.get("full_name"), str) else REPO
-        is_private = repo_info.get("private", True)
-        visibility = "🔒 Private Repo" if is_private else "🌍 Public Repo"
-        repo_size_kb = repo_info.get("size", 0)
-        default_branch = repo_info.get("default_branch") if isinstance(repo_info.get("default_branch"), str) else "main"
-        created_at = repo_info.get("created_at", "N/A")[:10] if repo_info.get("created_at") else "N/A"
-        
-        owner_data = repo_info.get("owner")
-        if isinstance(owner_data, dict) and owner_data.get("login"):
-            owner_login = owner_data.get("login")
-        else:
-            owner_login = repo_name.split("/")[0] if "/" in repo_name else "N/A"
-            
-        repo_html_url = f"https://github.com/{REPO}"
-        if isinstance(repo_info.get("html_url"), str) and repo_info["html_url"].startswith("http"):
-            repo_html_url = repo_info["html_url"]
-
-        quota = get_github_actions_monthly_quota(owner_login)
-        quota_icon = "🟢" if quota["pct_remain"] > 30 else ("🟡" if quota["pct_remain"] > 10 else "🔴")
-
-        text = (
-            "ℹ️ <b>Cloud Server & Repository Intelligence</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌐 <b>Repository:</b> <code>{repo_name}</code>\n"
-            f"👑 <b>Owner:</b> <code>{owner_login}</code>\n"
-            f"🛡️ <b>Visibility:</b> <b>{visibility}</b>\n"
-            f"🌿 <b>Default Branch:</b> <code>{default_branch}</code>\n"
-            f"📦 <b>Repo Size:</b> <code>{repo_size_kb} KB</code>\n"
-            f"📅 <b>Created On:</b> <code>{created_at}</code>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⏱️ <b>Monthly Private Actions Time Limit (Real-Time):</b>\n"
-            f"• 📊 <b>Monthly Free Quota:</b> <code>2,000 Mins / Month</code>\n"
-            f"• ⏳ <b>Used This Month:</b> <code>{quota['used_mins']} Mins</code> ({quota['pct_used']:.1f}%)\n"
-            f"• {quota_icon} <b>Remaining Balance:</b> <code>{quota['remaining_mins']} Mins</code> ({quota['pct_remain']:.1f}%)\n"
-            f"• 🔄 <b>Cycle Resets On:</b> <code>{quota['reset_date']}</code>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚡ <b>Live Server Status:</b>\n"
-            "• <b>Daemon Status:</b> 🟢 <b>Active & Healthy</b>\n"
-            "• <b>Auto-Restart:</b> 🛑 <b>Disabled (Manual Run Control)</b>\n"
-            f"• <b>Active Scripts:</b> {active_summary}\n"
-            f"• <b>Current Run ID:</b> <code>#{RUN_ID}</code>\n"
-            f"• <b>Current Uptime:</b> <code>{hours}h {minutes}m {seconds}s</code>\n"
-            f"• <b>Scheduled Stop In:</b> <code>{lh}h {lm}m {ls}s</code> (30m Alert Active)\n"
-            f"• <b>Security Vault:</b> 🔐 <b>AES-256 Authenticated Encryption</b>\n"
-            f"• <b>Secret Scanner Shield:</b> 🛡️ <b>100% Protected (.gitignore active)</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
-                    {"text": "🌐 Open on GitHub", "url": repo_html_url}
-                ],
-                [
-                    {"text": "🚀 Scripts Runner", "callback_data": "menu_runner"},
-                    {"text": "📂 View Files", "callback_data": "menu_files"}
-                ],
-                [
-                    {"text": "🔙 Main Menu", "callback_data": "menu_main"}
-                ]
+    repo_html_url = f"https://github.com/{REPO}"
+    text = (
+        "ℹ️ <b>Server Info:</b>\n"
+        "• <b>Uptime:</b> Active\n"
+        f"• <b>Repo:</b> <code>{REPO}</code>\n"
+        f"• <b>Run ID:</b> <code>#{RUN_ID}</code>"
+    )
+    markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
+                {"text": "🌐 Open on GitHub", "url": repo_html_url}
+            ],
+            [
+                {"text": "🔙 Main Menu", "callback_data": "menu_main"}
             ]
-        }
-        if message_id:
-            edit_tg_message(chat_id, message_id, text, reply_markup=markup)
-        else:
-            send_tg_message(chat_id, text, reply_markup=markup)
-    except Exception as e:
-        logger.error(f"Failed to render server info view: {e}")
-        fallback_text = f"ℹ️ <b>Server Info:</b>\n• <b>Uptime:</b> Active\n• <b>Repo:</b> <code>{REPO}</code>\n• <b>Run ID:</b> <code>#{RUN_ID}</code>"
-        if message_id:
-            edit_tg_message(chat_id, message_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
-        else:
-            send_tg_message(chat_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
-    except Exception as e:
-        logger.error(f"Failed to render server info view: {e}")
-        fallback_text = f"ℹ️ <b>Server Info:</b>\n• <b>Uptime:</b> Active\n• <b>Repo:</b> <code>{REPO}</code>\n• <b>Run ID:</b> <code>#{RUN_ID}</code>"
-        if message_id:
-            edit_tg_message(chat_id, message_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
-        else:
-            send_tg_message(chat_id, fallback_text, reply_markup={"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "menu_main"}]]})
+        ]
+    }
+    if message_id:
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+    else:
+        send_tg_message(chat_id, text, reply_markup=markup)
     
 def format_bytes_human(size_in_bytes):
     """Formats raw bytes into human readable KB, MB, GB."""
@@ -4844,22 +4698,22 @@ def main():
     tg_thread = threading.Thread(target=telegram_polling_loop, daemon=True, name="TGPolling")
     tg_thread.start()
     
-    # Watchdog loop: runs for 5.5 hours, sends alert 30 min before stopping, and cleanly exits without auto-restart
+    # Watchdog loop: runs for 2.0 hours (7200s), sends alert 30 min before stopping, and cleanly exits without auto-restart
     warn_30m_sent = False
     try:
         while IS_RUNNING:
             elapsed = time.time() - START_TIME
             remaining = RUN_DURATION_SECONDS - elapsed
 
-            # 1. 📢 30-Minute Prior Alert before shutdown
+            # 1. 📢 30-Minute Prior Alert before shutdown (at 1.5 hours)
             if not warn_30m_sent and remaining <= 1800 and elapsed > 60:
                 warn_30m_sent = True
                 notify_all_admins(
                     "⚠️ <b>Server Expiry Warning (30 Minutes Remaining)</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "⏳ <b>Server Uptime:</b> <code>5.0 Hours</code>\n"
+                    "⏳ <b>Server Uptime:</b> <code>1.5 Hours</code>\n"
                     "🛑 <b>Scheduled Shutdown in:</b> <code>30 Minutes</code>\n\n"
-                    "💡 <i>Auto-restart is disabled. The workflow will stop cleanly at 5.5 hours. All databases and active scripts will be safely saved to GitHub.</i>",
+                    "💡 <i>Auto-restart is disabled. The workflow will stop cleanly at 2.0 hours. All databases and active scripts will be safely saved to GitHub.</i>",
                     reply_markup={
                         "inline_keyboard": [
                             [{"text": "📊 Open Dashboard", "callback_data": "menu_main"}]
@@ -4867,16 +4721,16 @@ def main():
                     }
                 )
 
-            # 2. 🛑 5.5 Hours Reached: Clean stop without auto-restart
+            # 2. 🛑 2.0 Hours Reached: Clean stop without auto-restart
             if elapsed >= RUN_DURATION_SECONDS:
-                logger.info("⏳ 5.5 Hours limit reached. Performing clean shutdown without auto-restart...")
+                logger.info("⏳ 2.0 Hours limit reached. Performing clean shutdown without auto-restart...")
                 break
 
             time.sleep(5)
     except (KeyboardInterrupt, SystemExit):
         pass
 
-    execute_relay_handoff_sequence("5.5 Hours reached")
+    execute_relay_handoff_sequence("2.0 Hours reached")
 
 if __name__ == "__main__":
     main()
