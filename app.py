@@ -1533,6 +1533,9 @@ def get_main_menu_keyboard():
             [
                 {"text": "ℹ️ Server Info", "callback_data": "menu_server_info"},
                 {"text": "🧹 Clean RAM", "callback_data": "menu_clean_ram"}
+            ],
+            [
+                {"text": "🛑 Stop Workflow", "callback_data": "menu_stop_workflow_prompt"}
             ]
         ]
     }
@@ -2738,6 +2741,10 @@ def show_server_info_view(chat_id, message_id=None):
                 [
                     {"text": "🔄 Refresh Info", "callback_data": "menu_server_info"},
                     {"text": "🧹 Clean RAM", "callback_data": "menu_clean_ram"}
+                ],
+                [
+                    {"text": "🛑 Stop Workflow", "callback_data": "menu_stop_workflow_prompt"},
+                    {"text": "🌐 Open on GitHub", "url": repo_html_url}
                 ],
                 [
                     {"text": "🚀 Scripts Runner", "callback_data": "menu_runner"},
@@ -4402,7 +4409,71 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         }
         edit_tg_message(chat_id, message_id, text, reply_markup=markup)
 
-    # 15b. Test Relay Handoff API
+    # 15b. Stop Workflow Confirmation Prompt
+    elif data == "menu_stop_workflow_prompt":
+        answer_callback(callback_id)
+        text = (
+            "🛑 <b>Stop Workflow & Shutdown Server?</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "This action will:\n"
+            "• 💾 Checkpoint and backup all SQLite databases & files to GitHub.\n"
+            "• 🛑 Cleanly stop all running child bots.\n"
+            f"• ⚡ Terminate active GitHub Actions workflow runner (<code>#{RUN_ID}</code>).\n"
+            "• 📴 Turn off the cloud server completely (No auto-restart).\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Are you sure you want to stop the workflow now?"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🛑 Yes, Stop Workflow Now", "callback_data": "menu_stop_workflow_do"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_main"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 15c. Execute Stop Workflow
+    elif data == "menu_stop_workflow_do":
+        answer_callback(callback_id, "🛑 Stopping Workflow...", show_alert=True)
+        edit_tg_message(
+            chat_id,
+            message_id,
+            "🛑 <b>Stopping Cloud Runner & Workflow...</b>\n"
+            "Saving databases and terminating runner..."
+        )
+        def async_stop_workflow():
+            time.sleep(1.0)
+            notify_all_admins(
+                "🛑 <b>Workflow & Cloud Server Stopped:</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📦 All databases and states have been safely committed to GitHub.\n"
+                "📴 <i>Cloud runner is now completely OFF. Auto-restart is disabled.</i>"
+            )
+            # 1. Flush SQLite DBs
+            flush_all_sqlite_databases()
+            # 2. Stop child apps
+            stop_child_app(script_name=None, clear_active=False)
+            # 3. Final git sync
+            git_sync_to_github("Manual workflow stop by admin via Telegram button")
+            # 4. Cancel workflow run via API if in GitHub Actions
+            if EFFECTIVE_TOKEN and RUN_ID and RUN_ID != "local-dev":
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {EFFECTIVE_TOKEN}",
+                        "Accept": "application/vnd.github+json"
+                    }
+                    requests.post(
+                        f"https://api.github.com/repos/{REPO}/actions/runs/{RUN_ID}/cancel",
+                        headers=headers,
+                        timeout=5
+                    )
+                except Exception as e:
+                    logger.debug(f"Cancel workflow API call: {e}")
+            time.sleep(2)
+            sys.exit(0)
+
+        threading.Thread(target=async_stop_workflow, daemon=False, name="WorkflowStopper").start()
+
+    # 15d. Test Relay Handoff API
     elif data == "menu_test_handoff":
         answer_callback(callback_id, "🧪 Testing GitHub Dispatch API...")
         status_enum, status_msg = check_relay_configuration()
