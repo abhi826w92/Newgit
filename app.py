@@ -1478,8 +1478,8 @@ def execute_relay_handoff_sequence(reason="Manual Shutdown"):
 
     # 3. Cleanly stop child apps and exit
     stop_child_app(script_name=None, clear_active=False)
-    time.sleep(2)
-    sys.exit(0)
+    time.sleep(1)
+    os._exit(0)
 
 # ---------------------------------------------------------------------------
 # Visual UI & Keyboards
@@ -4441,35 +4441,46 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             "Saving databases and terminating runner..."
         )
         def async_stop_workflow():
-            time.sleep(1.0)
+            global IS_RUNNING
+            IS_RUNNING = False
+            logger.info("🛑 Stop Workflow button clicked by admin. Initiating real-time shutdown.")
+            
+            # 1. Flush SQLite DBs to guarantee zero corruption
+            flush_all_sqlite_databases()
+            
+            # 2. Terminate child processes immediately
+            stop_child_app(script_name=None, clear_active=False)
+            
+            # 3. Final git sync
+            git_sync_to_github("Manual workflow stop by admin via Telegram button")
+            
+            # 4. Notify admins
             notify_all_admins(
                 "🛑 <b>Workflow & Cloud Server Stopped:</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "📦 All databases and states have been safely committed to GitHub.\n"
                 "📴 <i>Cloud runner is now completely OFF. Auto-restart is disabled.</i>"
             )
-            # 1. Flush SQLite DBs
-            flush_all_sqlite_databases()
-            # 2. Stop child apps
-            stop_child_app(script_name=None, clear_active=False)
-            # 3. Final git sync
-            git_sync_to_github("Manual workflow stop by admin via Telegram button")
-            # 4. Cancel workflow run via API if in GitHub Actions
+            
+            # 5. Cancel workflow run via API if running in GitHub Actions
             if EFFECTIVE_TOKEN and RUN_ID and RUN_ID != "local-dev":
                 try:
                     headers = {
                         "Authorization": f"Bearer {EFFECTIVE_TOKEN}",
                         "Accept": "application/vnd.github+json"
                     }
-                    requests.post(
+                    r = requests.post(
                         f"https://api.github.com/repos/{REPO}/actions/runs/{RUN_ID}/cancel",
                         headers=headers,
                         timeout=5
                     )
+                    logger.info(f"Cancel workflow API response: {r.status_code}")
                 except Exception as e:
                     logger.debug(f"Cancel workflow API call: {e}")
-            time.sleep(2)
-            sys.exit(0)
+            
+            time.sleep(1.0)
+            logger.info("👋 Exiting process immediately via os._exit(0).")
+            os._exit(0)
 
         threading.Thread(target=async_stop_workflow, daemon=False, name="WorkflowStopper").start()
 
