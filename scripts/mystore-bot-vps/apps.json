@@ -1,0 +1,193 @@
+{
+  "developer": {
+    "avatar": "icons/avatar.svg",
+    "bio": "Crafting fast, private, and powerful mobile apps, web applications, and open-source utilities. Explore my work, join our community, and get in touch!",
+    "handle": "@R3V_X",
+    "name": "R3V_X",
+    "socials": [
+      {
+        "icon": "globe",
+        "name": "Portfolio",
+        "url": "https://aboutmee.pages.dev/"
+      },
+      {
+        "icon": "telegram",
+        "name": "Contact Dev",
+        "url": "https://t.me/R3V_X"
+      },
+      {
+        "icon": "users",
+        "name": "Community",
+        "url": "https://t.me/allinformation0173"
+      },
+      {
+        "icon": "instagram",
+        "name": "Instagram",
+        "url": "https://www.instagram.com/opeditzxx/?utm_source=qr&r=nametag"
+      },
+      {
+        "icon": "github",
+        "name": "GitHub",
+        "url": "https://github.com/v54087912-collab"
+      }
+    ],
+    "tagline": "Independent Mobile & Web App Developer",
+    "website": "https://aboutmee.pages.dev/"
+  },
+  "categories": [
+    "All",
+    "Apps",
+    "Web",
+    "Open Source",
+    "TG Bots",
+    "⭐ Favorites"
+  ],
+  "apps": [
+    {
+      "category": "Apps",
+      "description": "- Zero-RAM MTProto Streaming\n- Public REST API\n- Advanced Search & Filters\n- Recycle Bin + Auto-Restore\n- Starred Files & Custom Labels\n- Complete File Management\n- Instant File Duplication\n- Zero-Knowledge Architecture",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v3.0.0/TG.Drive_3.0.0.1.apk",
+      "downloads": "",
+      "icon": "https://i.ibb.co/7JSWcffh/logo-1788241138.jpg",
+      "id": "6605d4f6",
+      "name": "TG Drive",
+      "rating": "",
+      "screenshots": [
+        "https://i.ibb.co/QjKQSg7B/file-350.jpg",
+        "https://i.ibb.co/PGx30Rrz/file-355.jpg",
+        "https://i.ibb.co/rRXkYQJG/file-354.jpg",
+        "https://i.ibb.co/F4r5vM8L/file-352.jpg",
+        "https://i.ibb.co/XrHLv9wR/file-351.jpg"
+      ],
+      "size": "8.78 MB",
+      "tagline": "🚀 TG Drive v3.0 — Officially Released!\nYour Telegram. Now your Unlimited Cloud Drive. ☁️",
+      "type": "app",
+      "updatedDate": "2026-09-01",
+      "version": "v3.0.0"
+    },
+    {
+      "category": "Apps",
+      "description": "- App analysis & comparison\n- Permission & AppOps management\n- APK backup, clone, decompile\n- DEX/Smali conversion tools\n- Native .so library analysis\n- Tracker scanning & SSL unpinning\n- Freeze/unfreeze & batch app control\n- Root-level data access\n- Full file management\n- Most tools work without root — some need ADB/Root for advanced features.",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v4.0.7/DevKit.Manager.apk",
+      "downloads": "1K+",
+      "icon": "https://i.ibb.co/qFL36gzp/logo-1788246207.jpg",
+      "id": "223bbcac",
+      "name": "DevKit Manager.apk",
+      "rating": "5.0",
+      "screenshots": [
+        "https://i.ibb.co/JFF0Qtvg/file-363.jpg",
+        "https://i.ibb.co/4gD6czhQ/file-361.jpg",
+        "https://i.ibb.co/fYqWHRj8/file-359.jpg",
+        "https://i.ibb.co/27hbQPFc/file-360.jpg",
+        "https://i.ibb.co/2YWRgy8D/file-362.jpg",
+        "https://i.ibb.co/N6Gks5yz/file-364.jpg",
+        "https://i.ibb.co/1thbc9nC/file-366.jpg",
+        "https://i.ibb.co/RTMhz0q0/file-365.jpg"
+      ],
+      "size": "15 MB",
+      "tagline": "An all-in-one Android app management & reverse engineering toolkit — now with 84 MCP tools for AI-assisted, natural-language control.",
+      "type": "app",
+      "updatedDate": "2026-09-01",
+      "version": "v4.0.7"
+    },
+    {
+      "category": "Apps",
+      "description": "- Clean Markdown rendering\n- Nested folders\n- Images, audio, video & GIF attachments\n- Custom Rules & auto-styling\n- Formatting toolbar\n- Drag & drop\n- Dark mode\n- Code blocks\n- Checklists\n- Security Vault\n- And Many More...\n- TG Drive Cloud Sync\n- ON/OFF sync toggle\n- Auto-upload new notes\n- Smart cloud replacement\n- Export notes to cloud\n- MCP support for AI integrations 🤖",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.5/Nested.Notes.apk",
+      "downloads": "1K+",
+      "icon": "https://i.ibb.co/1YTVQB6w/logo-1788246606.jpg",
+      "id": "5cff5cb2",
+      "name": "Nested Notes",
+      "rating": "5.0",
+      "screenshots": [
+        "https://i.ibb.co/JWVss7Qd/shot-1788246939.jpg",
+        "https://i.ibb.co/F4gkgMF7/shot-1788247018.jpg",
+        "https://i.ibb.co/FbT40Vy2/shot-1788247034.jpg",
+        "https://i.ibb.co/Kp15m51K/shot-1788247038.jpg",
+        "https://i.ibb.co/jPkzkzKY/shot-1788247046.jpg",
+        "https://i.ibb.co/CfVb84y/shot-1788247051.jpg",
+        "https://i.ibb.co/nsBvCGyr/shot-1788247056.jpg",
+        "https://i.ibb.co/PsbBqjLd/shot-1788247060.jpg",
+        "https://i.ibb.co/G4ZN5GK5/shot-1788247102.jpg",
+        "https://i.ibb.co/XrtfxnyB/shot-1788247115.jpg"
+      ],
+      "size": "4.7 MB",
+      "tagline": "A clean, distraction-free native notes app with powerful organization and customization features.",
+      "type": "app",
+      "updatedDate": "2026-09-01",
+      "version": "v1.5"
+    },
+    {
+      "category": "Apps",
+      "description": "- 100+ Sites Supported — all your favorite streaming/download sites in a single app\n- Zero Ads Guarantee — smart ad-blocking engine that kills popups and redirect ads at the source\nSmart Redirect Alert — if a site tries to push you toward a suspicious link, a clean popup shows up instantly — Dismiss or Open, your call\n\n- Fast Search — find your site instantly with the top search bar\n- Clean UI — dark theme, minimal design, zero clutter\n- Lightweight — no bloat, no analytics tracking\n- Smooth Navigation — one tap to open a site, seamless back-button history navigation",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.4.5.00/Watch.Hub_1.4.5.00.apk",
+      "downloads": "1K+",
+      "icon": "https://i.ibb.co/qL9BRhMq/logo-1788248050.jpg",
+      "id": "aab1b445",
+      "name": "WatchHub",
+      "rating": "5.0",
+      "screenshots": [
+        "https://i.ibb.co/VccFmS2k/shot-1788248216.jpg",
+        "https://i.ibb.co/XfbTpkNK/shot-1788248223.jpg",
+        "https://i.ibb.co/FkPZ7mpX/shot-1788248227.jpg",
+        "https://i.ibb.co/zVS6VwBW/shot-1788248234.jpg",
+        "https://i.ibb.co/fY39X7ZP/shot-1788248292.jpg",
+        "https://i.ibb.co/j9VK14bt/shot-1788248294.jpg",
+        "https://i.ibb.co/C5MXGb1W/shot-1788248299.jpg",
+        "https://i.ibb.co/SDCTKHzh/shot-1788248306.jpg",
+        "https://i.ibb.co/chFjVZHH/shot-1788248311.jpg"
+      ],
+      "size": "0.95 MB",
+      "tagline": "WatchHub — Everything, One Place\nOne app, unlimited entertainment. Movies, series, anime — no more jumping between different apps and browsers.",
+      "type": "app",
+      "updatedDate": "2026-09-01",
+      "version": "v1.4.5.00"
+    },
+    {
+      "category": "Web",
+      "description": "- Zero-RAM MTProto Streaming\n- Public REST API\n- Advanced Search & Filters\n- Recycle Bin + Auto-Restore\n- Starred Files & Custom Labels\n- Complete File Management\n- Instant File Duplication\n- Zero-Knowledge Architecture",
+      "downloads": "1K+",
+      "icon": "https://i.ibb.co/9HhDTnWy/logo-1788248452.jpg",
+      "id": "b665d407",
+      "name": "TG Drive (Web)",
+      "rating": "5.0",
+      "screenshots": [
+        "https://i.ibb.co/QjKQSg7B/file-350.jpg",
+        "https://i.ibb.co/PGx30Rrz/file-355.jpg",
+        "https://i.ibb.co/rRXkYQJG/file-354.jpg",
+        "https://i.ibb.co/F4r5vM8L/file-352.jpg",
+        "https://i.ibb.co/XrHLv9wR/file-351.jpg"
+      ],
+      "size": "Online Web App",
+      "tagline": "TG Drive v3.0 — Officially Released! Your Telegram. Now your Unlimited Cloud Drive.",
+      "type": "web",
+      "updatedDate": "2026-09-01",
+      "version": "v3.0.0",
+      "webUrl": "tgdriveo.pages.dev"
+    },
+    {
+      "category": "TG Bots",
+      "description": "- Free Unlimited store\n- % secure\n- click download\n- Multiple files support\n- And many more",
+      "downloadUrl": "https://t.me/XFilesStoreBot",
+      "downloads": "1K+",
+      "icon": "icons/icon-1952.svg",
+      "id": "2658e588",
+      "name": "Files store Bot",
+      "rating": "5.0",
+      "screenshots": [
+        "https://i.ibb.co/GQg55Qch/shot-1788252894-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/HLvFZwWy/shot-2658e588-1788252895.jpg",
+        "https://i.ibb.co/7tbsScFr/shot-1788252894-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/QFf7m71y/shot-1788252894-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/sJdNrBxK/shot-1788252894-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/v4SQHHMf/shot-1788252894-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/4RL8W99b/shot-1788252894-Ag-ACAg-UA.jpg"
+      ],
+      "size": "15 MB",
+      "tagline": "Free & Unlimited Cloud Storage for TG Files — Store, Manage & Share Your Files Easily.",
+      "type": "app",
+      "updatedDate": "2026-09-01",
+      "version": "v1.0.0"
+    }
+  ]
+}
