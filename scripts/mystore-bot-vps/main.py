@@ -66,6 +66,7 @@ from keyboards import (
     cancel_wizard_keyboard,
     skip_step_keyboard,
     screenshots_step_keyboard,
+    is_valid_telegram_button_url,
 )
 
 # Configuration & Security Whitelist
@@ -2703,10 +2704,18 @@ def finalize_app_update_release(user_id, chat_id):
         user_states.pop(user_id, None)
 
         markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            InlineKeyboardButton("🌐 Open in Store", url=f"{STORE_WEB_URL.rstrip('/')}/#/apps/{app_id}"),
-            InlineKeyboardButton("🔙 Back to App Menu", callback_data=f"view_app:{app_id}")
-        )
+        btns = []
+        store_app_url = f"{STORE_WEB_URL.rstrip('/')}/#/apps/{app_id}" if STORE_WEB_URL else ""
+        if is_valid_telegram_button_url(store_app_url):
+            btns.append(InlineKeyboardButton("🌐 Open in Store", url=store_app_url))
+        else:
+            btns.append(InlineKeyboardButton("🔗 Copy Web Link", callback_data=f"copy_url:{app_id}"))
+
+        if is_valid_telegram_button_url(direct_url):
+            btns.append(InlineKeyboardButton("📥 Direct Download", url=direct_url))
+
+        btns.append(InlineKeyboardButton("🔙 Back to App Menu", callback_data=f"view_app:{app_id}"))
+        markup.add(*btns)
 
         success_text = (
             f"🎉 <b>App Successfully Updated & Released!</b>\n"
@@ -2722,7 +2731,10 @@ def finalize_app_update_release(user_id, chat_id):
             f"<i>{changelog}</i>\n\n"
             f"🔥 <i>Live on Web Store & GitHub Releases!</i>"
         )
-        bot.edit_message_text(success_text, chat_id, status_msg.message_id, reply_markup=markup)
+        try:
+            bot.edit_message_text(success_text, chat_id, status_msg.message_id, reply_markup=markup)
+        except Exception:
+            bot.edit_message_text(success_text, chat_id, status_msg.message_id, reply_markup=back_to_main_keyboard())
         log_activity("App Updated & Released", user_id=user_id, details=f"App: {app_name}, Tag: {tag}")
 
     except Exception as e:

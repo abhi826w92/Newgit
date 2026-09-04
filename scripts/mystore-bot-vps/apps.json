@@ -84,7 +84,7 @@
         "https://i.ibb.co/1thbc9nC/file-366.jpg",
         "https://i.ibb.co/RTMhz0q0/file-365.jpg"
       ],
-      "size": "47 MB",
+      "size": "15 MB",
       "tagline": "An all-in-one Android app management & reverse engineering toolkit — now with 84 MCP tools for AI-assisted, natural-language control.",
       "type": "app",
       "updatedDate": "2026-09-01",
@@ -93,7 +93,7 @@
     {
       "category": "Apps",
       "description": "- Clean Markdown rendering\n- Nested folders\n- Images, audio, video & GIF attachments\n- Custom Rules & auto-styling\n- Formatting toolbar\n- Drag & drop\n- Dark mode\n- Code blocks\n- Checklists\n- Security Vault\n- And Many More...\n- TG Drive Cloud Sync\n- ON/OFF sync toggle\n- Auto-upload new notes\n- Smart cloud replacement\n- Export notes to cloud\n- MCP support for AI integrations 🤖",
-      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v2.0/Nested.Notes_2.0.apk",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.5/Nested.Notes.apk",
       "downloads": "1K+",
       "icon": "https://i.ibb.co/1YTVQB6w/logo-1788246606.jpg",
       "id": "5cff5cb2",
@@ -111,21 +111,11 @@
         "https://i.ibb.co/G4ZN5GK5/shot-1788247102.jpg",
         "https://i.ibb.co/XrtfxnyB/shot-1788247115.jpg"
       ],
-      "size": "5.38 MB",
+      "size": "4.7 MB",
       "tagline": "A clean, distraction-free native notes app with powerful organization and customization features.",
       "type": "app",
-      "updatedDate": "2026-09-04",
-      "version": "v2.0",
-      "changelog": "New Update",
-      "versionHistory": [
-        {
-          "version": "v2.0",
-          "date": "2026-09-04",
-          "size": "5.38 MB",
-          "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v2.0/Nested.Notes_2.0.apk",
-          "changelog": "New Update"
-        }
-      ]
+      "updatedDate": "2026-09-01",
+      "version": "v1.5"
     },
     {
       "category": "Apps",
@@ -180,7 +170,7 @@
       "description": "- Free Unlimited store\n- % secure\n- click download\n- Multiple files support\n- And many more",
       "downloadUrl": "https://t.me/XFilesStoreBot",
       "downloads": "1K+",
-      "icon": "https://i.ibb.co/0RF3ns3Q/logo-1788255237-Ag-ACAg-UA.jpg",
+      "icon": "icons/icon-1952.svg",
       "id": "2658e588",
       "name": "Files store Bot",
       "rating": "5.0",
