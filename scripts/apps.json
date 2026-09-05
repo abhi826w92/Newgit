@@ -200,26 +200,109 @@
       "version": "v1.0.0"
     },
     {
-      "type": "web",
+      "buttonText": "",
       "category": "Web",
-      "name": "Temp Gmail",
-      "tagline": "Temp Gmail is a premium disposable email service that allows you to receive emails at a temporary address that expires after a set period.",
-      "webUrl": "http://tempgmails.pages.dev",
-      "size": "Online Web App",
-      "version": "v1.0.0",
       "description": "Temp Gmail is a premium disposable email service that allows you to receive emails at a temporary address that expires after a set period. It's designed to protect your primary inbox from spam, trackers, and unwanted subscriptions.\n",
-      "updatedDate": "2026-09-04",
-      "rating": "",
       "downloads": "",
       "icon": "https://i.ibb.co/JR1p5Xz9/logo-1788529077.jpg",
-      "buttonText": "",
+      "id": "87e075e1",
+      "name": "Temp Gmail",
+      "rating": "",
       "screenshots": [
         "https://i.ibb.co/GvnBqG6H/shot-1788529098-Ag-ACAg-UA.jpg",
         "https://i.ibb.co/SXPNnkZj/shot-1788529103-Ag-ACAg-UA.jpg",
         "https://i.ibb.co/nsNp197B/shot-1788529111-Ag-ACAg-UA.jpg",
         "https://i.ibb.co/KjgWLWT4/shot-1788529123-Ag-ACAg-UA.jpg"
       ],
-      "id": "87e075e1"
+      "size": "Online Web App",
+      "tagline": "Temp Gmail is a premium disposable email service that allows you to receive emails at a temporary address that expires after a set period.",
+      "type": "web",
+      "updatedDate": "2026-09-04",
+      "version": "v1.0.0",
+      "webUrl": "http://tempgmails.pages.dev"
+    },
+    {
+      "buttonText": "🎨 𝗪𝗮𝗿𝗺 𝗠𝗶𝗻𝗶𝗺𝗮𝗹𝗶𝘀𝘁 𝗗𝗮𝗿𝗸 𝗨𝗜\n📱 𝗦𝗺𝗮𝗿𝘁 𝗔𝘂𝘁𝗼-𝗟𝗮𝗻𝗱𝘀𝗰𝗮𝗽𝗲 & 𝗙𝘂𝗹𝗹𝘀𝗰𝗿𝗲𝗲𝗻 𝗟𝗼𝗰𝗸\n📺 𝗬𝗼𝘂𝗧𝘂𝗯𝗲-𝗦𝘁𝘆𝗹𝗲 𝗧𝗮𝗽 𝗖𝗼𝗻𝘁𝗿𝗼𝗹𝘀 + ±𝟭𝟬𝘀 𝗚𝗲𝘀𝘁𝘂𝗿𝗲 𝗦𝗸𝗶𝗽\n🔊 𝗨𝗽 𝘁𝗼 𝟮𝟬𝟬% 𝗔𝘂𝗱𝗶𝗼 𝗕𝗼𝗼𝘀𝘁 — 𝗘𝗻𝗵𝗮𝗻𝗰𝗲𝗱 𝗗𝗶𝗮𝗹𝗼𝗴𝘂𝗲 𝗖𝗹𝗮𝗿𝗶𝘁𝘆\n🔗 𝟭-𝗖𝗹𝗶𝗰𝗸 𝗦𝘁𝗿𝗲𝗮𝗺 𝗦𝗵𝗮𝗿𝗶𝗻𝗴 + 𝗘𝘅𝗮𝗰𝘁 𝗣𝗹𝗮𝘆𝗯𝗮𝗰𝗸 𝗧𝗶𝗺𝗲𝘀𝘁𝗮𝗺𝗽𝘀\n🌐 𝗦𝗲𝗿𝘃𝗲𝗿𝗹𝗲𝘀𝘀 𝗘𝗱𝗴𝗲 𝗖𝗢𝗥𝗦 𝗣𝗿𝗼𝘅𝘆 — 𝗦𝗲𝗮𝗺𝗹𝗲𝘀𝘀 𝗦𝘁𝗿𝗲𝗮𝗺 𝗔𝗰𝗰𝗲𝘀𝘀\n🕒 𝗟𝗼𝗰𝗮𝗹 𝗥𝗲𝗰𝗲𝗻𝘁 𝗛𝗶𝘀𝘁𝗼𝗿𝘆 — 𝗦𝘁𝗼𝗿𝗲𝗱 𝗢𝗻-𝗗𝗲𝘃𝗶𝗰𝗲\n🔒 𝟭𝟬𝟬% 𝗖𝗹𝗶𝗲𝗻𝘁-𝗦𝗶𝗱𝗲 𝗣𝗿𝗶𝘃𝗮𝗰𝘆 — 𝗭𝗲𝗿𝗼 𝗧𝗿𝗮𝗰𝗸𝗶𝗻𝗴 & 𝗟𝗼𝗴𝘀",
+      "category": "Web",
+      "description": "Stream direct video links, HLS (.m3u8) live feeds, and local video files seamlessly — with zero ads and ultra-fast edge buffering. ⚡\n",
+      "downloads": "",
+      "icon": "https://i.ibb.co/hJ2qmj0s/logo-1788579795.jpg",
+      "id": "f43b7ca6",
+      "name": "Streamflow",
+      "rating": "",
+      "screenshots": [
+        "https://i.ibb.co/nqMWX4jd/shot-1788579809-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/1JpQLKZz/shot-1788579809-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/hxc9WWz1/shot-1788579809-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/607V4XwG/shot-1788579809-Ag-ACAg-UA.jpg"
+      ],
+      "size": "Online Web App",
+      "tagline": "Stream direct video links, HLS (.m3u8) live feeds, and local video files seamlessly — with zero ads and ultra-fast edge buffering. ⚡",
+      "type": "web",
+      "updatedDate": "2026-09-05",
+      "version": "v1.0.0",
+      "webUrl": "https://streamon.pages.dev"
+    },
+    {
+      "buttonText": "🚫 No over-engineering\n♻️ Reuse before rebuild\n📝 Zero boilerplate (YAGNI)\n🗑️ Delete over add\n🐞 Fix root causes, not symptoms\n\n💡 Result: code that's simple, clean, maintainable & production-ready — like a real senior dev would write.",
+      "category": "Web",
+      "description": "- 𝗚𝗟𝗢𝗕𝗔𝗟 𝗠𝗖𝗣\n- 𝗪𝗵𝗮𝘁 𝗶𝘀 𝗶𝘁?\n- An MCP server that gives your AI a \"𝙇𝙖𝙯𝙮 𝙎𝙚𝙣𝙞𝙤𝙧 𝘿𝙚𝙫𝙚𝙡𝙤𝙥𝙚𝙧\" mindset — least code, best solution.",
+      "downloads": "",
+      "icon": "https://i.ibb.co/4Z5YBBJ9/logo-1788580063.jpg",
+      "id": "198619b7",
+      "name": "Ponytail Global [MCP]",
+      "rating": "",
+      "screenshots": [
+        "https://i.ibb.co/fdmsjZKh/shot-1788580084-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/Hfp4fGjR/shot-1788580084-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/C5G8LRy7/shot-1788580084-Ag-ACAg-UA.jpg"
+      ],
+      "size": "Online Web App",
+      "tagline": "No local setup — connect & use instantly",
+      "type": "web",
+      "updatedDate": "2026-09-05",
+      "version": "v1.0.0",
+      "webUrl": "https://ponytailmcp.youganksaini1.workers.dev/"
+    },
+    {
+      "buttonText": "✨ Console & error tracking\n🌐 Deep network inspection\n🧩 Interactive JSON + DOM viewer\n📄 One-tap bug report export",
+      "category": "Open Source",
+      "description": "- A lightweight Manifest V3 Chrome/Edge extension that turns your browser into a mini DevTools panel. 🛠️",
+      "downloads": "",
+      "icon": "https://i.ibb.co/b57Cy6xY/logo-1788580318.jpg",
+      "id": "c9e96c6b",
+      "name": "WebDebug Pro [Extension]",
+      "rating": "",
+      "screenshots": [
+        "https://i.ibb.co/93rVQGJX/shot-1788580326-Ag-ACAg-UA.jpg"
+      ],
+      "size": "Source Code",
+      "sourceUrl": "http://github.com/v54087912-collab/Webdebug-pro",
+      "tagline": "A lightweight Manifest V3 Chrome/Edge extension that turns your browser into a mini DevTools panel. 🛠️",
+      "type": "opensource",
+      "updatedDate": "2026-09-05",
+      "version": "v1.0.0"
+    },
+    {
+      "type": "opensource",
+      "category": "Open Source",
+      "name": "Jules CLI",
+      "tagline": "A powerful CLI tool to supercharge your Jules AI workflow — directly from your terminal.",
+      "sourceUrl": "https://github.com/v54087912-collab/Jules-CLI.git",
+      "size": "Source Code",
+      "version": "v2.5",
+      "description": "- A powerful CLI tool to supercharge your Jules AI workflow — directly from your terminal.",
+      "updatedDate": "2026-09-05",
+      "rating": "",
+      "downloads": "",
+      "icon": "https://i.ibb.co/7JyBmV5c/logo-1788580504.jpg",
+      "buttonText": "📂 Workspace Isolation — Safe file management in /Jules-Workspace\n🚀 Auto-Init — Auto Git setup & GitHub shadow repo creation\n⚡ Fast Mode — Auto-approves steps for speed\n💬 Interactive Shell — Live status, interrupt handling & autocomplete\n🩹 Smart Patching — Incremental changes with .bak backups\n☁️ Cloud Persistence — Tasks run even if you disconnect\n📊 Usage Analytics — Track your session stats",
+      "screenshots": [
+        "https://i.ibb.co/ymFdgfHG/shot-1788580560-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/352kz8Sk/shot-1788580560-Ag-ACAg-UA.jpg",
+        "https://i.ibb.co/1Y19rRrR/shot-1788580561-Ag-ACAg-UA.jpg"
+      ],
+      "id": "8dc5b56e"
     }
   ]
 }
