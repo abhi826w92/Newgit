@@ -130,7 +130,7 @@
     {
       "category": "Apps",
       "description": "- 100+ Sites Supported — all your favorite streaming/download sites in a single app\n- Zero Ads Guarantee — smart ad-blocking engine that kills popups and redirect ads at the source\nSmart Redirect Alert — if a site tries to push you toward a suspicious link, a clean popup shows up instantly — Dismiss or Open, your call\n\n- Fast Search — find your site instantly with the top search bar\n- Clean UI — dark theme, minimal design, zero clutter\n- Lightweight — no bloat, no analytics tracking\n- Smooth Navigation — one tap to open a site, seamless back-button history navigation",
-      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.4.5.00/Watch.Hub_1.4.5.00.apk",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.5.00/Watch.Hub_1.5.00.apk",
       "downloads": "1K+",
       "icon": "https://i.ibb.co/qL9BRhMq/logo-1788248050.jpg",
       "id": "aab1b445",
@@ -150,8 +150,18 @@
       "size": "0.95 MB",
       "tagline": "WatchHub — Everything, One Place\nOne app, unlimited entertainment. Movies, series, anime — no more jumping between different apps and browsers.",
       "type": "app",
-      "updatedDate": "2026-09-01",
-      "version": "v1.4.5.00"
+      "updatedDate": "2026-09-06",
+      "version": "v1.5.00",
+      "changelog": "Release v1.5.00 — Bug fixes and performance improvements.",
+      "versionHistory": [
+        {
+          "version": "v1.5.00",
+          "date": "2026-09-06",
+          "size": "0.95 MB",
+          "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.5.00/Watch.Hub_1.5.00.apk",
+          "changelog": "Release v1.5.00 — Bug fixes and performance improvements."
+        }
+      ]
     },
     {
       "category": "Web",
@@ -222,9 +232,9 @@
       "webUrl": "http://tempgmails.pages.dev"
     },
     {
-      "buttonText": "🎨 𝗪𝗮𝗿𝗺 𝗠𝗶𝗻𝗶𝗺𝗮𝗹𝗶𝘀𝘁 𝗗𝗮𝗿𝗸 𝗨𝗜\n📱 𝗦𝗺𝗮𝗿𝘁 𝗔𝘂𝘁𝗼-𝗟𝗮𝗻𝗱𝘀𝗰𝗮𝗽𝗲 & 𝗙𝘂𝗹𝗹𝘀𝗰𝗿𝗲𝗲𝗻 𝗟𝗼𝗰𝗸\n📺 𝗬𝗼𝘂𝗧𝘂𝗯𝗲-𝗦𝘁𝘆𝗹𝗲 𝗧𝗮𝗽 𝗖𝗼𝗻𝘁𝗿𝗼𝗹𝘀 + ±𝟭𝟬𝘀 𝗚𝗲𝘀𝘁𝘂𝗿𝗲 𝗦𝗸𝗶𝗽\n🔊 𝗨𝗽 𝘁𝗼 𝟮𝟬𝟬% 𝗔𝘂𝗱𝗶𝗼 𝗕𝗼𝗼𝘀𝘁 — 𝗘𝗻𝗵𝗮𝗻𝗰𝗲𝗱 𝗗𝗶𝗮𝗹𝗼𝗴𝘂𝗲 𝗖𝗹𝗮𝗿𝗶𝘁𝘆\n🔗 𝟭-𝗖𝗹𝗶𝗰𝗸 𝗦𝘁𝗿𝗲𝗮𝗺 𝗦𝗵𝗮𝗿𝗶𝗻𝗴 + 𝗘𝘅𝗮𝗰𝘁 𝗣𝗹𝗮𝘆𝗯𝗮𝗰𝗸 𝗧𝗶𝗺𝗲𝘀𝘁𝗮𝗺𝗽𝘀\n🌐 𝗦𝗲𝗿𝘃𝗲𝗿𝗹𝗲𝘀𝘀 𝗘𝗱𝗴𝗲 𝗖𝗢𝗥𝗦 𝗣𝗿𝗼𝘅𝘆 — 𝗦𝗲𝗮𝗺𝗹𝗲𝘀𝘀 𝗦𝘁𝗿𝗲𝗮𝗺 𝗔𝗰𝗰𝗲𝘀𝘀\n🕒 𝗟𝗼𝗰𝗮𝗹 𝗥𝗲𝗰𝗲𝗻𝘁 𝗛𝗶𝘀𝘁𝗼𝗿𝘆 — 𝗦𝘁𝗼𝗿𝗲𝗱 𝗢𝗻-𝗗𝗲𝘃𝗶𝗰𝗲\n🔒 𝟭𝟬𝟬% 𝗖𝗹𝗶𝗲𝗻𝘁-𝗦𝗶𝗱𝗲 𝗣𝗿𝗶𝘃𝗮𝗰𝘆 — 𝗭𝗲𝗿𝗼 𝗧𝗿𝗮𝗰𝗸𝗶𝗻𝗴 & 𝗟𝗼𝗴𝘀",
+      "buttonText": "",
       "category": "Web",
-      "description": "Stream direct video links, HLS (.m3u8) live feeds, and local video files seamlessly — with zero ads and ultra-fast edge buffering. ⚡\n",
+      "description": "Stream direct video links, HLS (.m3u8) live feeds, and local video files seamlessly — with zero ads and ultra-fast edge buffering. ⚡\n\n- 🎨 Warm Minimalist Dark UI\n- 📱 Smart Auto-Landscape & Fullscreen Lock\n- 📺 YouTube-Style Tap Controls + ±10s Gesture Skip\n- 🔊 Up to 200% Audio Boost — Enhanced Dialogue Clarity\n- 🔗 1-Click Stream Sharing + Exact Playback Timestamps\n- 🌐 Serverless Edge CORS Proxy — Seamless Stream Access\n- 🕒 Local Recent History — Stored On-Device\n- 🔒 100% Client-Side Privacy — Zero Tracking & Logs",
       "downloads": "",
       "icon": "https://i.ibb.co/hJ2qmj0s/logo-1788579795.jpg",
       "id": "f43b7ca6",
@@ -244,9 +254,9 @@
       "webUrl": "https://streamon.pages.dev"
     },
     {
-      "buttonText": "🚫 No over-engineering\n♻️ Reuse before rebuild\n📝 Zero boilerplate (YAGNI)\n🗑️ Delete over add\n🐞 Fix root causes, not symptoms\n\n💡 Result: code that's simple, clean, maintainable & production-ready — like a real senior dev would write.",
+      "buttonText": "",
       "category": "Web",
-      "description": "- 𝗚𝗟𝗢𝗕𝗔𝗟 𝗠𝗖𝗣\n- 𝗪𝗵𝗮𝘁 𝗶𝘀 𝗶𝘁?\n- An MCP server that gives your AI a \"𝙇𝙖𝙯𝙮 𝙎𝙚𝙣𝙞𝙤𝙧 𝘿𝙚𝙫𝙚𝙡𝙤𝙥𝙚𝙧\" mindset — least code, best solution.",
+      "description": "An MCP server that gives your AI a \"Lazy Senior Developer\" mindset — least code, best solution.\n\n- 🚫 No over-engineering\n- ♻️ Reuse before rebuild\n- 📝 Zero boilerplate (YAGNI)\n- 🗑️ Delete over add\n- 🐞 Fix root causes, not symptoms\n- 💡 Result: code that is simple, clean, maintainable & production-ready",
       "downloads": "",
       "icon": "https://i.ibb.co/4Z5YBBJ9/logo-1788580063.jpg",
       "id": "198619b7",
@@ -265,9 +275,9 @@
       "webUrl": "https://ponytailmcp.youganksaini1.workers.dev/"
     },
     {
-      "buttonText": "✨ Console & error tracking\n🌐 Deep network inspection\n🧩 Interactive JSON + DOM viewer\n📄 One-tap bug report export",
+      "buttonText": "",
       "category": "Open Source",
-      "description": "- A lightweight Manifest V3 Chrome/Edge extension that turns your browser into a mini DevTools panel. 🛠️",
+      "description": "A lightweight Manifest V3 Chrome/Edge extension that turns your browser into a mini DevTools panel. 🛠️\n\n- ✨ Console & error tracking\n- 🌐 Deep network inspection\n- 🧩 Interactive JSON + DOM viewer\n- 📄 One-tap bug report export",
       "downloads": "",
       "icon": "https://i.ibb.co/b57Cy6xY/logo-1788580318.jpg",
       "id": "c9e96c6b",
@@ -284,25 +294,25 @@
       "version": "v1.0.0"
     },
     {
-      "type": "opensource",
+      "buttonText": "",
       "category": "Open Source",
-      "name": "Jules CLI",
-      "tagline": "A powerful CLI tool to supercharge your Jules AI workflow — directly from your terminal.",
-      "sourceUrl": "https://github.com/v54087912-collab/Jules-CLI.git",
-      "size": "Source Code",
-      "version": "v2.5",
-      "description": "- A powerful CLI tool to supercharge your Jules AI workflow — directly from your terminal.",
-      "updatedDate": "2026-09-05",
-      "rating": "",
+      "description": "A powerful CLI tool to supercharge your Jules AI workflow — directly from your terminal.\n\n- 📂 Workspace Isolation — Safe file management in /Jules-Workspace\n- 🚀 Auto-Init — Auto Git setup & GitHub shadow repo creation\n- ⚡ Fast Mode — Auto-approves steps for speed\n- 💬 Interactive Shell — Live status, interrupt handling & autocomplete\n- 🩹 Smart Patching — Incremental changes with .bak backups\n- ☁️ Cloud Persistence — Tasks run even if you disconnect\n- 📊 Usage Analytics — Track your session stats",
       "downloads": "",
       "icon": "https://i.ibb.co/7JyBmV5c/logo-1788580504.jpg",
-      "buttonText": "📂 Workspace Isolation — Safe file management in /Jules-Workspace\n🚀 Auto-Init — Auto Git setup & GitHub shadow repo creation\n⚡ Fast Mode — Auto-approves steps for speed\n💬 Interactive Shell — Live status, interrupt handling & autocomplete\n🩹 Smart Patching — Incremental changes with .bak backups\n☁️ Cloud Persistence — Tasks run even if you disconnect\n📊 Usage Analytics — Track your session stats",
+      "id": "8dc5b56e",
+      "name": "Jules CLI",
+      "rating": "",
       "screenshots": [
         "https://i.ibb.co/ymFdgfHG/shot-1788580560-Ag-ACAg-UA.jpg",
         "https://i.ibb.co/352kz8Sk/shot-1788580560-Ag-ACAg-UA.jpg",
         "https://i.ibb.co/1Y19rRrR/shot-1788580561-Ag-ACAg-UA.jpg"
       ],
-      "id": "8dc5b56e"
+      "size": "Source Code",
+      "sourceUrl": "https://github.com/v54087912-collab/Jules-CLI.git",
+      "tagline": "A powerful CLI tool to supercharge your Jules AI workflow — directly from your terminal.",
+      "type": "opensource",
+      "updatedDate": "2026-09-05",
+      "version": "v2.5"
     }
   ]
 }
