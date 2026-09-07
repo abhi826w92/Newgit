@@ -46,7 +46,7 @@
     {
       "category": "Apps",
       "changelog": "Release v3.0.0 — Bug fixes and performance improvements.",
-      "description": "- Zero-RAM MTProto Streaming\n- Public REST API\n- Advanced Search & Filters\n- Recycle Bin + Auto-Restore\n- Starred Files & Custom Labels\n- Complete File Management\n- Instant File Duplication\n- Zero-Knowledge Architecture",
+      "description": "- Real-Time Media Streaming\n- Multipart Uploads\n- Deep Folder Nesting\n- Zero-Server System\n- AES Encryption\n- Cross-Device Access\n- %+ Reduced RAM Usage\n- Supports 100,000+ Files Without Crashes\n- Locked 60 FPS Smooth Scrolling\n- Offline Support\n- Cleaner, More Professional UI\n- Thumbnails Now Visible in Files and Dashboard\n- Instant Recovery — Data Rebuilds Even After Cache Is Cleared",
       "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v3.0.0/TG.Drive_3.0.0.1.apk",
       "downloads": "",
       "icon": "https://i.ibb.co/7JSWcffh/logo-1788241138.jpg",
@@ -63,7 +63,7 @@
       "size": "10.35 MB",
       "tagline": "🚀 TG Drive v3.0 — Officially Released!\nYour Telegram. Now your Unlimited Cloud Drive. ☁️",
       "type": "app",
-      "updatedDate": "2026-09-06",
+      "updatedDate": "2026-09-07",
       "version": "v3.0.0",
       "versionHistory": [
         {
@@ -136,11 +136,11 @@
       "version": "v2.1",
       "versionHistory": [
         {
-          "version": "v2.1",
+          "changelog": "Release v2.1 — Bug fixes and performance improvements.",
           "date": "2026-09-06",
-          "size": "5.38 MB",
           "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v2.1/Nested.Notes_2.1.apk",
-          "changelog": "Release v2.1 — Bug fixes and performance improvements."
+          "size": "5.38 MB",
+          "version": "v2.1"
         },
         {
           "changelog": "New Update",
