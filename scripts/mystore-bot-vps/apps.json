@@ -45,9 +45,9 @@
   "apps": [
     {
       "category": "Apps",
-      "changelog": "Release v3.0.0 — Bug fixes and performance improvements.",
+      "changelog": "Added Privacy Features \nAdded more Shortcutkeys\nImprove speed \nFix bugs",
       "description": "- Real-Time Media Streaming\n- Multipart Uploads\n- Deep Folder Nesting\n- Zero-Server System\n- AES Encryption\n- Cross-Device Access\n- %+ Reduced RAM Usage\n- Supports 100,000+ Files Without Crashes\n- Locked 60 FPS Smooth Scrolling\n- Offline Support\n- Cleaner, More Professional UI\n- Thumbnails Now Visible in Files and Dashboard\n- Instant Recovery — Data Rebuilds Even After Cache Is Cleared",
-      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v3.0.0/TG.Drive_3.0.0.1.apk",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v3.0.1/TG.Drive_3.0.0.1.apk",
       "downloads": "",
       "icon": "https://i.ibb.co/7JSWcffh/logo-1788241138.jpg",
       "id": "6605d4f6",
@@ -63,9 +63,16 @@
       "size": "10.35 MB",
       "tagline": "🚀 TG Drive v3.0 — Officially Released!\nYour Telegram. Now your Unlimited Cloud Drive. ☁️",
       "type": "app",
-      "updatedDate": "2026-09-07",
+      "updatedDate": "2026-09-11",
       "version": "v3.0.0",
       "versionHistory": [
+        {
+          "version": "v3.0.0",
+          "date": "2026-09-11",
+          "size": "10.35 MB",
+          "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v3.0.1/TG.Drive_3.0.0.1.apk",
+          "changelog": "Added Privacy Features \nAdded more Shortcutkeys\nImprove speed \nFix bugs"
+        },
         {
           "changelog": "Release v3.0.0 — Bug fixes and performance improvements.",
           "date": "2026-09-06",
