@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#7C4DFF</color>
+    <color name="primary_dark">#5E35B1</color>
+    <color name="secondary">#00BFA5</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="bg_window">#F5F5F5</color>
+    <color name="bg_card">#FFFFFF</color>
+    <color name="bg_card_stroke">#DDDDDD</color>
+    <color name="bg_search">#F2F2F2</color>
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#757575</color>
+    <color name="text_hint">#9E9E9E</color>
+    <color name="toolbar_bg">#7C4DFF</color>
+    <color name="dialog_bg">#FFFFFF</color>
+</resources>

@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_layout_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:id="@+id/root_layout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/toolbar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="?android:attr/actionBarSize"
+            android:background="@color/toolbar_bg"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingEnd="8dp">
+
+            <ImageButton
+                android:id="@+id/btn_menu"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Menu"
+                android:padding="12dp"
+                android:src="@drawable/ic_menu"
+                android:layout_marginEnd="8dp"/>
+
+            <TextView
+                android:id="@+id/toolbar_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/app_name"
+                android:textColor="@color/white"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <ImageButton
+                android:id="@+id/btn_theme"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Theme"
+                android:padding="12dp"
+                android:src="@drawable/ic_theme" />
+
+        </LinearLayout>
+
+        <EditText
+            android:id="@+id/search_input"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/bg_search"
+            android:drawableStart="@drawable/ic_search"
+            android:drawablePadding="8dp"
+            android:drawableTint="@color/text_secondary"
+            android:hint="@string/search_hint"
+            android:imeOptions="actionSearch"
+            android:inputType="text"
+            android:maxLines="1"
+            android:paddingStart="16dp"
+            android:paddingTop="12dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="12dp"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_hint"
+            android:textSize="15sp" />
+
+        <HorizontalScrollView
+            android:id="@+id/category_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:clipToPadding="false"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/category_container"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <ListView
+            android:id="@+id/site_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:divider="@null"
+            android:dividerHeight="0dp"
+            android:paddingStart="12dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="8dp" />
+
+    </LinearLayout>
+
+    <!-- Dim Overlay -->
+    <View
+        android:id="@+id/sidebar_dim_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#A6000000"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true"/>
+
+    <!-- Sidebar Menu -->
+    <ScrollView
+        android:id="@+id/sidebar_menu"
+        android:layout_width="280dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="start"
+        android:background="@color/bg_window"
+        android:visibility="gone"
+        android:translationX="-280dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:elevation="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+            
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@color/primary"
+                android:padding="24dp"
+                android:orientation="vertical">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Developer Info"
+                    android:textColor="#FFFFFF"
+                    android:textSize="22sp"
+                    android:textStyle="bold" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="By R3V_X"
+                    android:textColor="#DDDDDD"
+                    android:textSize="14sp"
+                    android:layout_marginTop="4dp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:id="@+id/menu_favorites"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Favorite Sites"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_history"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Watch History"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_downloads"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Downloads"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_app_lock"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="App Lock: OFF"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_adblock"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="AdBlocker: ON"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_contact"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Contact Developer"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_community"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Community Link"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_instagram"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Instagram"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_github"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="GitHub"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/menu_portfolio"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Portfolio Web"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="16dp"
+                    android:background="?android:attr/selectableItemBackground" />
+
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+
+</FrameLayout>
