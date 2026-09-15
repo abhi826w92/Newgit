@@ -67,11 +67,11 @@
       "version": "v3.0.0",
       "versionHistory": [
         {
-          "version": "v3.0.0",
+          "changelog": "Added Privacy Features \nAdded more Shortcutkeys\nImprove speed \nFix bugs",
           "date": "2026-09-11",
-          "size": "10.35 MB",
           "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v3.0.1/TG.Drive_3.0.0.1.apk",
-          "changelog": "Added Privacy Features \nAdded more Shortcutkeys\nImprove speed \nFix bugs"
+          "size": "10.35 MB",
+          "version": "v3.0.0"
         },
         {
           "changelog": "Release v3.0.0 — Bug fixes and performance improvements.",
@@ -160,11 +160,11 @@
     },
     {
       "category": "Apps",
-      "changelog": "Release v1.5.00 — Bug fixes and performance improvements.",
+      "changelog": "download feature added\nbug fixed",
       "description": "- 100+ Sites Supported — all your favorite streaming/download sites in a single app\n- Zero Ads Guarantee — smart ad-blocking engine that kills popups and redirect ads at the source\nSmart Redirect Alert — if a site tries to push you toward a suspicious link, a clean popup shows up instantly — Dismiss or Open, your call\n\n- Fast Search — find your site instantly with the top search bar\n- Clean UI — dark theme, minimal design, zero clutter\n- Lightweight — no bloat, no analytics tracking\n- Smooth Navigation — one tap to open a site, seamless back-button history navigation",
-      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.5.00/Watch.Hub_1.5.00.apk",
+      "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.6.00/signed.apk",
       "downloads": "1K+",
-      "icon": "https://i.ibb.co/qL9BRhMq/logo-1788248050.jpg",
+      "icon": "https://i.ibb.co/LXCLwySg/file-447.jpg",
       "id": "aab1b445",
       "name": "WatchHub",
       "rating": "5.0",
@@ -182,9 +182,16 @@
       "size": "0.95 MB",
       "tagline": "WatchHub — Everything, One Place\nOne app, unlimited entertainment. Movies, series, anime — no more jumping between different apps and browsers.",
       "type": "app",
-      "updatedDate": "2026-09-06",
-      "version": "v1.5.00",
+      "updatedDate": "2026-09-15",
+      "version": "v1.6.00",
       "versionHistory": [
+        {
+          "changelog": "download feature added\nbug fixed",
+          "date": "2026-09-15",
+          "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.6.00/signed.apk",
+          "size": "0.95 MB",
+          "version": "v1.6.00"
+        },
         {
           "changelog": "Release v1.5.00 — Bug fixes and performance improvements.",
           "date": "2026-09-06",
