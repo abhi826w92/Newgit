@@ -96,6 +96,15 @@ apihelper.SESSION = _session
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", num_threads=16)
 
+# Globally wrap answer_callback_query to safely catch expired callback timeouts (Telegram Error 400)
+_orig_answer_callback_query = bot.answer_callback_query
+def _safe_answer_callback_query(*args, **kwargs):
+    try:
+        return _orig_answer_callback_query(*args, **kwargs)
+    except Exception:
+        return False
+bot.answer_callback_query = _safe_answer_callback_query
+
 # Temporary in-memory user conversation states
 user_states = {}
 
@@ -3083,6 +3092,16 @@ if __name__ == "__main__":
     print(f"👑 Authorized Admins: {ADMIN_IDS}")
     print(f"🐙 GitHub Target: {github_mgr.owner}/{github_mgr.repo}")
     print(f"🔥 Firebase Database: {firebase_mgr.db_url}")
+
+    # Proactively clear any active webhook & stale pending updates so polling never crashes with 409 Conflict
+    try:
+        print("🔄 Clearing any active webhook & pending updates...")
+        bot.delete_webhook(drop_pending_updates=True)
+        time.sleep(1)
+        print("✅ Telegram webhook cleared successfully.")
+    except Exception as e:
+        print(f"⚠️ Notice when clearing webhook: {e}")
+
     print(f"🚀 Bot is polling for commands...")
     
     try:
