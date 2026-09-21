@@ -42,10 +42,39 @@ def sanitize_github_token(token):
         t = t[6:].strip()
     return t
 
+# Workspace & Config
+WORKSPACE_DIR = os.getcwd()
+
+def get_effective_github_token():
+    """
+    Resolves the active GitHub PAT or Actions token from environment or git remote.
+    Works seamlessly across GitHub Actions runners, local dev, and VPS environments.
+    """
+    token = sanitize_github_token(
+        os.environ.get("GH_PAT", "") or 
+        os.environ.get("GITHUB_TOKEN", "") or 
+        os.environ.get("GH_TOKEN", "")
+    )
+    if token:
+        return token
+    try:
+        remote_url = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=WORKSPACE_DIR).decode().strip()
+        m = re.search(r'://([^:@]+)(?::([^@]+))?@github\.com', remote_url)
+        if m:
+            user_or_token = m.group(1)
+            token_part = m.group(2)
+            if token_part:
+                return sanitize_github_token(token_part)
+            if user_or_token.startswith("ghp_") or user_or_token.startswith("github_pat_"):
+                return sanitize_github_token(user_or_token)
+    except Exception:
+        pass
+    return ""
+
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 GH_PAT = sanitize_github_token(os.environ.get("GH_PAT", ""))
 GITHUB_TOKEN = sanitize_github_token(os.environ.get("GITHUB_TOKEN", ""))
-EFFECTIVE_TOKEN = GH_PAT if GH_PAT else GITHUB_TOKEN
+EFFECTIVE_TOKEN = get_effective_github_token()
 REPO = os.environ.get("GITHUB_REPOSITORY", "abhi826w92/Newgit").strip()
 RUN_ID = os.environ.get("GITHUB_RUN_ID", "local-dev").strip()
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "server.yml").strip()
@@ -55,9 +84,6 @@ WORKFLOW_REF = os.environ.get("WORKFLOW_REF", "main").strip()
 RUN_DURATION_SECONDS = int(os.environ.get("RUN_DURATION_SECONDS", "7200"))
 START_TIME = time.time()
 IS_RUNNING = True
-
-# Workspace & Config
-WORKSPACE_DIR = os.getcwd()
 SCRIPTS_DIR = os.path.join(WORKSPACE_DIR, "scripts")
 os.makedirs(SCRIPTS_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(WORKSPACE_DIR, "bot_config.json")
@@ -128,8 +154,8 @@ TG_BASE_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}"
 def load_config():
     default_cfg = {
         "admin_ids": [7249511572, 7251749429],
-        "auto_run_file": "bot.py",
-        "active_scripts": []
+        "active_scripts": [],
+        "manually_stopped_scripts": []
     }
     data = default_cfg.copy()
     if os.path.exists(CONFIG_FILE):
@@ -142,6 +168,10 @@ def load_config():
                     data["admin_ids"] = [data["admin_id"]] if data["admin_id"] else []
                 if "admin_ids" not in data or not data["admin_ids"]:
                     data["admin_ids"] = [7249511572, 7251749429]
+                if "active_scripts" not in data or data["active_scripts"] is None:
+                    data["active_scripts"] = []
+                if "manually_stopped_scripts" not in data or data["manually_stopped_scripts"] is None:
+                    data["manually_stopped_scripts"] = []
         except Exception as e:
             logger.error(f"Error loading config: {e}")
 
@@ -319,9 +349,7 @@ def download_tg_file(file_id, destination_path):
 git_sync_lock = threading.Lock()
 
 def git_sync_to_github(commit_message="Update via Telegram Controller"):
-    token_to_use = EFFECTIVE_TOKEN
-    if not token_to_use or not REPO:
-        return False, "GitHub Token or Repo not set"
+    token_to_use = get_effective_github_token()
     
     with git_sync_lock:
         try:
@@ -333,41 +361,77 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
                 except Exception:
                     pass
 
-            remote_url = f"https://x-access-token:{token_to_use}@github.com/{REPO}.git"
-            subprocess.run(["git", "config", "user.name", "TelegramController"], cwd=WORKSPACE_DIR, check=True)
-            subprocess.run(["git", "config", "user.email", "bot@controller.local"], cwd=WORKSPACE_DIR, check=True)
+            for git_stuck_path in [".git/rebase-apply", ".git/rebase-merge"]:
+                if os.path.exists(os.path.join(WORKSPACE_DIR, git_stuck_path)):
+                    subprocess.run(["git", "rebase", "--abort"], cwd=WORKSPACE_DIR, capture_output=True)
+                    break
+            if os.path.exists(os.path.join(WORKSPACE_DIR, ".git", "MERGE_HEAD")):
+                subprocess.run(["git", "merge", "--abort"], cwd=WORKSPACE_DIR, capture_output=True)
+
+            remote_url = None
+            if token_to_use and REPO:
+                if token_to_use.startswith(("ghp_", "github_pat_")):
+                    remote_url = f"https://{token_to_use}@github.com/{REPO}.git"
+                else:
+                    remote_url = f"https://x-access-token:{token_to_use}@github.com/{REPO}.git"
+            else:
+                remote_url = "origin"
+
+            subprocess.run(["git", "config", "user.name", "TelegramController"], cwd=WORKSPACE_DIR, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "bot@controller.local"], cwd=WORKSPACE_DIR, capture_output=True)
             
+            # Determine target branch
+            try:
+                cur_b = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=WORKSPACE_DIR).decode().strip()
+                target_branch = cur_b if (cur_b and cur_b != "HEAD") else (WORKFLOW_REF or "main")
+            except Exception:
+                target_branch = WORKFLOW_REF if WORKFLOW_REF else "main"
+
             # 1. Stage all changes including deletions (-A)
-            subprocess.run(["git", "add", "-A"], cwd=WORKSPACE_DIR, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=WORKSPACE_DIR, capture_output=True)
             
             # 2. Check if there are changes to commit
             status = subprocess.run(["git", "status", "--porcelain"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
-            if not status.stdout.strip():
-                logger.info("No git changes to commit.")
-                return True, "All files up to date."
-                
-            subprocess.run(["git", "commit", "-m", commit_message], cwd=WORKSPACE_DIR, check=True)
+            if status.stdout.strip():
+                subprocess.run(["git", "commit", "-m", commit_message], cwd=WORKSPACE_DIR, capture_output=True)
             
             # 3. Push changes directly to GitHub
-            target_branch = WORKFLOW_REF if WORKFLOW_REF else "main"
             push_res = subprocess.run(["git", "push", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
             if push_res.returncode == 0:
                 logger.info(f"Auto-sync to cloud complete: {commit_message}")
                 return True, "Cloud sync complete! All changes backed up."
-            else:
-                # Rebase with -X theirs so local deletions/updates strictly take precedence over remote!
-                subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "theirs", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
-                # Re-stage all local changes and deletions
-                subprocess.run(["git", "add", "-A"], cwd=WORKSPACE_DIR, capture_output=True)
-                status2 = subprocess.run(["git", "status", "--porcelain"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
-                if status2.stdout.strip():
-                    subprocess.run(["git", "commit", "-m", f"{commit_message} (reconciled)"], cwd=WORKSPACE_DIR, capture_output=True)
-                push_res = subprocess.run(["git", "push", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
-                if push_res.returncode == 0:
-                    logger.info(f"Auto-sync to cloud complete after rebase: {commit_message}")
+
+            # Fallback to origin if remote_url failed
+            if remote_url != "origin":
+                push_res_orig = subprocess.run(["git", "push", "origin", target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+                if push_res_orig.returncode == 0:
+                    logger.info(f"Auto-sync to cloud complete via origin: {commit_message}")
                     return True, "Cloud sync complete! All changes backed up."
-                logger.error(f"Git push error: {push_res.stderr}")
-                return False, f"Cloud Sync error: {push_res.stderr[-200:]}"
+
+            # Rebase with -X theirs so local deletions/updates strictly take precedence over remote!
+            rebase_res = subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "theirs", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
+            if rebase_res.returncode != 0:
+                subprocess.run(["git", "rebase", "--abort"], cwd=WORKSPACE_DIR, capture_output=True)
+                subprocess.run(["git", "pull", "--no-rebase", "-X", "theirs", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
+            
+            # Re-stage all local changes and deletions
+            subprocess.run(["git", "add", "-A"], cwd=WORKSPACE_DIR, capture_output=True)
+            status2 = subprocess.run(["git", "status", "--porcelain"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+            if status2.stdout.strip():
+                subprocess.run(["git", "commit", "-m", f"{commit_message} (reconciled)"], cwd=WORKSPACE_DIR, capture_output=True)
+            
+            push_res = subprocess.run(["git", "push", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+            if push_res.returncode == 0:
+                logger.info(f"Auto-sync to cloud complete after rebase: {commit_message}")
+                return True, "Cloud sync complete! All changes backed up."
+
+            push_lease = subprocess.run(["git", "push", "--force-with-lease", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+            if push_lease.returncode == 0:
+                logger.info(f"Auto-sync to cloud complete via force-with-lease: {commit_message}")
+                return True, "Cloud sync complete! All changes backed up."
+
+            logger.error(f"Git push error: {push_res.stderr}")
+            return False, f"Cloud Sync error: {push_res.stderr[-200:]}"
         except Exception as e:
             logger.error(f"git_sync_to_github error: {e}")
             return False, str(e)
@@ -696,13 +760,8 @@ def child_watchdog(proc, fname):
     
     running_processes.pop(fname, None)
 
-    # CRITICAL FIX: Only update config["active_scripts"] if process exited normally on its own during active runtime.
-    # NEVER overwrite or shrink active_scripts during server shutdown, handoff, or SIGTERM/SIGKILL termination!
-    if IS_RUNNING and not is_stopped and ret not in [-9, -15, 137, 143, -2, 2]:
-        active_scripts = list(get_active_running_processes().keys())
-        config["active_scripts"] = active_scripts
-        save_config(config)
-
+    # A script must ONLY be removed from active_scripts when manually stopped by user or deleted.
+    # Unexpected crashes/exits preserve active_scripts so scripts auto-resume on restart/relay.
     # If stopped intentionally by admin or terminated via SIGKILL/SIGTERM/shutdown, skip crash alert
     if is_stopped or not IS_RUNNING or ret in [-9, -15, 137, 143, -2, 2]:
         logger.info(f"Process {fname} stopped cleanly (Exit code: {ret}).")
@@ -1142,15 +1201,24 @@ def start_child_app(filename="bot.py", force_restart=False):
                     f"💡 <i>Tip: Use <b>Install Pip Package</b> if a dependency is missing.</i>"
                 )
             
-            active_list = list(get_active_running_processes().keys())
-            config["active_scripts"] = active_list
+            current_active = list(config.get("active_scripts", []))
+            if clean_name not in current_active:
+                current_active.append(clean_name)
+            config["active_scripts"] = current_active
+            
+            # Remove from manually_stopped_scripts so it will run on future boots
+            manually_stopped = list(config.get("manually_stopped_scripts", []))
+            config["manually_stopped_scripts"] = [
+                s for s in manually_stopped
+                if s != clean_name and os.path.basename(s) != base_filename
+            ]
             save_config(config)
             
             # Immediately lock running state to GitHub cloud in background
-            threading.Thread(target=git_sync_to_github, args=(f"Set active scripts: {', '.join(active_list)}",), daemon=True).start()
+            threading.Thread(target=git_sync_to_github, args=(f"Set active scripts: {', '.join(current_active)}",), daemon=True).start()
             
             req_note = f" (📦 {os.path.basename(req_path)})" if req_path else " (📄 Standalone)"
-            return True, f"✨ <b>{clean_name}</b> started successfully!{req_note}\n🆔 PID: <code>{proc.pid}</code>\n🟢 <b>Active Scripts:</b> {len(active_list)} running concurrently"
+            return True, f"✨ <b>{clean_name}</b> started successfully!{req_note}\n🆔 PID: <code>{proc.pid}</code>\n🟢 <b>Active Scripts:</b> {len(current_active)} running"
         except Exception as e:
             return False, f"❌ Start error: {e}"
 
@@ -1207,20 +1275,64 @@ def stop_child_app(script_name=None, clear_active=True):
             running_processes.pop(name, None)
 
     if clear_active:
-        active_list = list(get_active_running_processes().keys())
-        config["active_scripts"] = active_list
-        save_config(config)
-        threading.Thread(target=git_sync_to_github, args=("Update active scripts on stop",), daemon=True).start()
+        if not script_name:
+            # User stopped ALL scripts
+            all_active = list(config.get("active_scripts", []))
+            stopped_list = list(config.get("manually_stopped_scripts", []))
+            for s in all_active:
+                if s not in stopped_list:
+                    stopped_list.append(s)
+            config["manually_stopped_scripts"] = stopped_list
+            config["active_scripts"] = []
+            config["active_script"] = None
+            save_config(config)
+            threading.Thread(target=git_sync_to_github, args=("Stop all scripts",), daemon=True).start()
+        else:
+            clean_target = os.path.normpath(script_name.replace("scripts/", "").lstrip("/")).replace("\\", "/")
+            base_target = os.path.basename(clean_target)
+            proj_target = clean_target.split("/")[0] if "/" in clean_target else clean_target
+            
+            current_active = list(config.get("active_scripts", []))
+            new_active = []
+            for s in current_active:
+                s_clean = os.path.normpath(s.replace("scripts/", "").lstrip("/")).replace("\\", "/")
+                s_base = os.path.basename(s_clean)
+                s_proj = s_clean.split("/")[0] if "/" in s_clean else s_clean
+                is_match = (
+                    s == script_name
+                    or s_clean == clean_target
+                    or s_base == base_target
+                    or s_clean.startswith(f"{clean_target}/")
+                    or (proj_target and s_proj == proj_target)
+                    or s in stopped_names
+                )
+                if not is_match:
+                    new_active.append(s)
+            config["active_scripts"] = new_active
+            
+            # Add to manually_stopped_scripts so it will remain stopped on future boots
+            stopped_list = list(config.get("manually_stopped_scripts", []))
+            if clean_target not in stopped_list:
+                stopped_list.append(clean_target)
+            config["manually_stopped_scripts"] = stopped_list
+            
+            if config.get("active_script") in [clean_target, script_name, base_target]:
+                config["active_script"] = None
+                
+            save_config(config)
+            threading.Thread(target=git_sync_to_github, args=(f"Stop script: {clean_target}",), daemon=True).start()
 
     if stopped_names:
         if len(stopped_names) == 1:
             return True, f"🛑 <b>{stopped_names[0]}</b> has been stopped successfully."
         else:
             return True, f"🛑 Stopped {len(stopped_names)} scripts: " + ", ".join([f"<code>{n}</code>" for n in stopped_names])
+    elif script_name:
+        return True, f"🛑 <b>{script_name}</b> is marked as stopped."
     return False, "ℹ️ No running script found to stop."
 
 def restart_child_app(script_name=None):
-    """Restarts a specific script, or restarts ALL running/persistent scripts in parallel."""
+    """Restarts a specific script, or restarts ALL active scripts in parallel."""
     active = get_active_running_processes()
     
     if script_name:
@@ -1228,28 +1340,17 @@ def restart_child_app(script_name=None):
         time.sleep(1.0)
         return start_child_app(script_name)
     
-    # Identify all targets to restart
+    # Identify all targets to restart: only currently running or active scripts that are not manually stopped
     targets = list(active.keys())
     if not targets:
-        targets = config.get("active_scripts", [])
+        manually_stopped = set(config.get("manually_stopped_scripts", []))
+        targets = [s for s in config.get("active_scripts", []) if s not in manually_stopped]
     if not targets and config.get("active_script"):
-        targets = [config["active_script"]]
-    if not targets:
-        vault_scripts = list(config.get("env_vault", {}).keys())
-        for s in vault_scripts:
-            sp = os.path.join(SCRIPTS_DIR, s)
-            if os.path.exists(sp) and s not in targets:
-                targets.append(s)
-    if not targets:
-        for root, _, fs in os.walk(SCRIPTS_DIR):
-            for f in fs:
-                if f.endswith(".py") and not f.startswith("."):
-                    rel = os.path.relpath(os.path.join(root, f), SCRIPTS_DIR)
-                    if is_runnable_entry_point(rel) and rel not in targets:
-                        targets.append(rel)
+        if config["active_script"] not in config.get("manually_stopped_scripts", []):
+            targets = [config["active_script"]]
                 
     if not targets:
-        return False, "ℹ️ No scripts found to restart in <code>scripts/</code>."
+        return False, "ℹ️ No active scripts to restart. Please run a script from the dashboard first."
         
     # Stop all targets cleanly without clearing persistence
     stop_child_app(script_name=None, clear_active=False)
@@ -1515,8 +1616,13 @@ def execute_relay_handoff_sequence(reason="Manual Shutdown"):
     IS_RUNNING = False
     logger.info(f"🛑 Clean Server Shutdown ({reason}). Auto-restart is disabled.")
 
-    active_now = list(get_active_running_processes().keys())
-    config["active_scripts"] = active_now
+    # Preserve scripts previously started by user and NOT manually stopped, plus current active processes
+    manually_stopped = set(config.get("manually_stopped_scripts", []))
+    preserved = [s for s in config.get("active_scripts", []) if s not in manually_stopped]
+    for k in get_active_running_processes().keys():
+        if k not in manually_stopped and k not in preserved:
+            preserved.append(k)
+    config["active_scripts"] = preserved
     save_config(config)
 
     notify_all_admins(
@@ -1778,9 +1884,14 @@ def handle_text_message(chat_id, user_id, text):
             # Show interactive run menu
             prompt_run_menu(chat_id, user_id)
 
-    elif raw_text in ["/stop", "/stop_app", "/kill"]:
-        ok, msg = stop_child_app()
-        send_tg_message(chat_id, msg, reply_markup=get_main_menu_keyboard())
+    elif raw_text in ["/stop", "/stop_app", "/kill"] or raw_text.startswith(("/stop ", "/kill ")):
+        parts = raw_text.split()
+        if len(parts) > 1:
+            ok, msg = stop_child_app(script_name=parts[1], clear_active=True)
+            send_tg_message(chat_id, msg, reply_markup=get_main_menu_keyboard())
+        else:
+            ok, msg = stop_child_app(script_name=None, clear_active=True)
+            send_tg_message(chat_id, msg, reply_markup=get_main_menu_keyboard())
 
     elif raw_text in ["/restart"]:
         send_tg_message(chat_id, "🔄 Restarting application...")
@@ -2307,7 +2418,7 @@ def prompt_runner_menu(chat_id, user_id, message_id=None):
             else:
                 run_btn = {"text": f"▶️ Run {py}{badge_str}", "callback_data": f"exec_run_{py}"}
             
-            del_btn = {"text": "🗑️ Delete", "callback_data": f"file_del_{py}"}
+            del_btn = {"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{py}"}
             buttons.append([run_btn, del_btn])
 
     buttons.append([{"text": "📤 Upload New Script / ZIP", "callback_data": "menu_upload_prompt"}])
@@ -2559,7 +2670,7 @@ def show_files_view(chat_id, message_id=None):
                     row_btns.append({"text": f"🛑 Stop {entry_base or it}", "callback_data": f"confirm_stop_prompt_{running_script_name}"})
                 elif entry_script:
                     row_btns.append({"text": f"▶️ Run {entry_base}", "callback_data": f"exec_run_{entry_script}"})
-                row_btns.append({"text": "🗑️ Delete", "callback_data": f"file_del_{it}"})
+                row_btns.append({"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{it}"})
                 download_buttons.append(row_btns)
                 
             elif os.path.isfile(p):
@@ -2585,13 +2696,13 @@ def show_files_view(chat_id, message_id=None):
                         row_btns.append({"text": "🛑 Stop", "callback_data": f"confirm_stop_prompt_{it}"})
                     else:
                         row_btns.append({"text": "▶️ Run", "callback_data": f"exec_run_{it}"})
-                    row_btns.append({"text": "🗑️ Delete", "callback_data": f"file_del_{it}"})
+                    row_btns.append({"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{it}"})
                     download_buttons.append(row_btns)
                 else:
                     file_lines.append(f"• 📄 <code>{it}</code> ({human_sz})")
                     download_buttons.append([
                         {"text": f"📥 {it}", "callback_data": f"file_dl_{it}"},
-                        {"text": "🗑️ Delete", "callback_data": f"file_del_{it}"}
+                        {"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{it}"}
                     ])
                     
     text = (
@@ -4055,15 +4166,38 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
     # 5c. Do Stop Execution
     elif data.startswith("do_stop_"):
         fname = data.replace("do_stop_", "")
-        ok, msg = stop_child_app(script_name=fname)
+        ok, msg = stop_child_app(script_name=fname, clear_active=True)
         answer_callback(callback_id, f"{fname} stopped!", show_alert=True)
-        edit_tg_message(chat_id, message_id, f"🛑 <b>{fname} has been stopped successfully!</b>", reply_markup=get_main_menu_keyboard())
+        edit_tg_message(
+            chat_id, 
+            message_id, 
+            f"🛑 <b>{fname} has been stopped successfully!</b>\n\n"
+            f"💡 <i>This script will remain stopped on future runs and will not run until you start it again from the dashboard.</i>", 
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": f"▶️ Run {fname} Again", "callback_data": f"exec_run_{fname}"}],
+                    [{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "🔙 Main Menu", "callback_data": "menu_main"}]
+                ]
+            }
+        )
 
     # 5d. Stop All Scripts Execution
     elif data == "menu_stop_all":
         answer_callback(callback_id, "Stopping all scripts...")
         stop_child_app(script_name=None, clear_active=True)
-        send_tg_message(chat_id, "🛑 <b>All running scripts have been stopped.</b>", reply_markup=get_main_menu_keyboard())
+        stop_all_text = (
+            "🛑 <b>All running scripts have been stopped!</b>\n\n"
+            "💡 <i>All scripts will remain stopped on future runs until you run them again from the dashboard.</i>"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "🔙 Main Menu", "callback_data": "menu_main"}]
+            ]
+        }
+        if message_id:
+            edit_tg_message(chat_id, message_id, stop_all_text, reply_markup=markup)
+        else:
+            send_tg_message(chat_id, stop_all_text, reply_markup=markup)
 
     # 6. Restart Script
     elif data == "menu_restart":
@@ -4204,6 +4338,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
         # 7. Clear all active scripts, config, and vault
         config["active_scripts"] = []
+        config["manually_stopped_scripts"] = []
         config["active_script"] = None
         config["auto_run_file"] = None
         config["env_vault"] = {}
@@ -4216,8 +4351,14 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         except Exception:
             pass
         
-        # 8. Commit wipe to GitHub in background
-        threading.Thread(target=git_sync_to_github, args=("Wipe all scripts via Telegram",), daemon=True).start()
+        # 8. Commit wipe to GitHub in background with notification
+        def async_wipe_sync():
+            ok_w, msg_w = git_sync_to_github("Wipe all scripts via Telegram")
+            if ok_w:
+                notify_all_admins("🗑️ <b>All scripts and workspace files have been permanently wiped from GitHub.</b>")
+            else:
+                notify_all_admins(f"⚠️ <b>GitHub Wipe Sync Error:</b>\n<code>{msg_w}</code>")
+        threading.Thread(target=async_wipe_sync, daemon=True).start()
         
         # 9. Edit message in real time to show confirmation
         wipe_text = (
@@ -4236,7 +4377,25 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         }
         edit_tg_message(chat_id, message_id, wipe_text, reply_markup=markup)
 
-    # 10c. Direct & Fast Delete Single File/Folder Execution
+    # 10c. Confirm Delete Single Script / Project Prompt
+    elif data.startswith("confirm_del_file_"):
+        fname = data.replace("confirm_del_file_", "")
+        answer_callback(callback_id)
+        text = (
+            f"🗑️ <b>Confirm Permanent Deletion</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Are you sure you want to <b>PERMANENTLY DELETE</b> <code>{fname}</code>?\n\n"
+            f"⚠️ <i>This action will terminate running processes and permanently delete all code, files, and databases from the GitHub repository in real-time.</i>"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🗑️ Yes, Delete from GitHub", "callback_data": f"do_delete_file_{fname}"}],
+                [{"text": "❌ Cancel", "callback_data": "menu_files"}]
+            ]
+        }
+        edit_tg_message(chat_id, message_id, text, reply_markup=markup)
+
+    # 10d. Direct & Fast Delete Single File/Folder Execution
     elif data.startswith("file_del_") or data.startswith("do_delete_file_"):
         if data.startswith("do_delete_file_"):
             fname = data.replace("do_delete_file_", "")
@@ -4374,10 +4533,15 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 except Exception:
                     pass
 
-        # 8. Clean up config active_scripts and vault
-        active_list = list(get_active_running_processes().keys())
+        # 8. Clean up config active_scripts, manually_stopped_scripts, and vault
+        current_active = list(config.get("active_scripts", []))
         config["active_scripts"] = [
-            s for s in active_list 
+            s for s in current_active 
+            if s != clean_fname and s != fname and not (project_folder_name and (s == project_folder_name or s.startswith(f"{project_folder_name}/") or os.path.dirname(s) == project_folder_name))
+        ]
+        stopped = list(config.get("manually_stopped_scripts", []))
+        config["manually_stopped_scripts"] = [
+            s for s in stopped 
             if s != clean_fname and s != fname and not (project_folder_name and (s == project_folder_name or s.startswith(f"{project_folder_name}/") or os.path.dirname(s) == project_folder_name))
         ]
         if config.get("active_script") in [clean_fname, fname] or (project_folder_name and (config.get("active_script") == project_folder_name or str(config.get("active_script", "")).startswith(f"{project_folder_name}/"))):
@@ -4399,8 +4563,26 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         config["env_vault"] = vault
         save_config(config)
 
-        # 9. Single thread-safe background sync to permanently push deletion to GitHub repo!
-        threading.Thread(target=git_sync_to_github, args=(f"Permanently delete scripts/{project_folder_name or clean_fname} from repository",), daemon=True).start()
+        # 9. Thread-safe background sync to permanently push deletion to GitHub repo!
+        def async_delete_sync(target_disp_name):
+            ok_sync, sync_msg = git_sync_to_github(f"Permanently delete scripts/{target_disp_name} from repository")
+            if ok_sync:
+                logger.info(f"Permanently deleted scripts/{target_disp_name} from GitHub.")
+                notify_all_admins(
+                    f"🗑️ <b>Permanently Deleted from GitHub:</b>\n"
+                    f"• Target: <code>scripts/{target_disp_name}</code>\n"
+                    f"✅ Remote repository is updated in real-time."
+                )
+            else:
+                logger.error(f"GitHub deletion sync failed for {target_disp_name}: {sync_msg}")
+                notify_all_admins(
+                    f"⚠️ <b>GitHub Deletion Sync Error:</b>\n"
+                    f"Local files deleted, but cloud sync failed for <code>scripts/{target_disp_name}</code>:\n"
+                    f"<code>{sync_msg}</code>"
+                )
+
+        target_disp = project_folder_name or clean_fname
+        threading.Thread(target=async_delete_sync, args=(target_disp,), daemon=True).start()
 
         # 10. Refresh Telegram View in Real Time!
         show_files_view(chat_id, message_id)
@@ -5111,40 +5293,31 @@ def main():
             notify_all_admins(status_msg)
         threading.Thread(target=delayed_warn, daemon=True).start()
     
-    # Seamless Multi-Script Relay Persistence: Auto-resume active scripts
+    # Seamless Multi-Script Relay Persistence: Auto-resume ONLY scripts executed by user and NOT manually stopped
     active_list = config.get("active_scripts")
-    
-    # CRITICAL FIX: If active_list is already a list (even if empty []), strictly respect user selection!
-    # ONLY auto-detect if active_scripts was NEVER initialized (None, first ever run).
     if active_list is None:
         active_list = []
         if config.get("active_script"):
             active_list = [config["active_script"]]
-        else:
-            for it in sorted(os.listdir(SCRIPTS_DIR)):
-                if it.startswith(".") or it == "__pycache__":
-                    continue
-                p = os.path.join(SCRIPTS_DIR, it)
-                if os.path.isdir(p):
-                    entry = detect_project_entry_script(p)
-                    if entry and entry not in active_list:
-                        active_list.append(entry)
-                elif it.endswith(".py"):
-                    if is_runnable_entry_point(it) and it not in active_list:
-                        active_list.append(it)
         config["active_scripts"] = active_list
         save_config(config)
 
-    # Filter out any non-existent scripts to prevent startup errors
+    # Strictly filter out:
+    # 1. Any scripts that were manually stopped by the user from the dashboard
+    # 2. Any scripts that no longer exist on disk (deleted)
+    manually_stopped = set(config.get("manually_stopped_scripts", []))
     valid_active = []
     if active_list:
         for s in active_list:
             clean_s = os.path.normpath(s.replace("scripts/", "").lstrip("/")).replace("\\", "/")
+            if clean_s in manually_stopped or os.path.basename(clean_s) in manually_stopped:
+                logger.info(f"Skipping auto-resume for manually stopped script: {s}")
+                continue
             full_s = os.path.join(SCRIPTS_DIR, clean_s)
             if os.path.exists(full_s) or os.path.exists(os.path.join(WORKSPACE_DIR, s)):
                 valid_active.append(s)
         if len(valid_active) != len(active_list):
-            logger.info(f"Pruned {len(active_list) - len(valid_active)} deleted scripts from active_scripts.")
+            logger.info(f"Updated active_scripts from {len(active_list)} to {len(valid_active)} valid runnable scripts.")
             config["active_scripts"] = valid_active
             save_config(config)
 
