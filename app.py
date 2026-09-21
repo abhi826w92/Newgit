@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+import shutil
 import time
 import json
 import html
@@ -9,6 +11,11 @@ import signal
 import threading
 import subprocess
 import traceback
+import hashlib
+import hmac
+import base64
+import zipfile
+import sqlite3
 from datetime import datetime, date, timezone
 import requests
 
@@ -121,22 +128,34 @@ TG_BASE_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}"
 def load_config():
     default_cfg = {
         "admin_ids": [7249511572, 7251749429],
-        "auto_run_file": "bot.py"
+        "auto_run_file": "bot.py",
+        "active_scripts": []
     }
+    data = default_cfg.copy()
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                data = json.load(f)
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data.update(loaded)
                 if "admin_id" in data and "admin_ids" not in data:
                     data["admin_ids"] = [data["admin_id"]] if data["admin_id"] else []
-                if "admin_ids" not in data:
+                if "admin_ids" not in data or not data["admin_ids"]:
                     data["admin_ids"] = [7249511572, 7251749429]
-                if 7251749429 not in data["admin_ids"]:
-                    data["admin_ids"].append(7251749429)
-                return data
-        except Exception:
-            pass
-    return default_cfg
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+
+    # Dynamically inject admin IDs from environment variables (TG_ADMIN_ID, ADMIN_ID, etc.)
+    for env_key in ["TG_ADMIN_ID", "ADMIN_ID", "ADMIN_IDS", "OWNER_ID"]:
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            for item in val.replace(",", " ").split():
+                if item.isdigit():
+                    uid = int(item)
+                    if uid not in data.get("admin_ids", []):
+                        data.setdefault("admin_ids", []).append(uid)
+
+    return data
 
 def save_config(cfg):
     try:
@@ -147,15 +166,51 @@ def save_config(cfg):
 
 config = load_config()
 
+def get_all_admin_ids():
+    admin_list = list(config.get("admin_ids", []))
+    for env_key in ["TG_ADMIN_ID", "ADMIN_ID", "ADMIN_IDS", "OWNER_ID"]:
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            for item in val.replace(",", " ").split():
+                if item.isdigit():
+                    uid = int(item)
+                    if uid not in admin_list:
+                        admin_list.append(uid)
+    if not admin_list:
+        admin_list = [7249511572, 7251749429]
+    return admin_list
+
 def is_admin(user_id):
-    admin_list = config.get("admin_ids", [7249511572, 7251749429])
+    admin_list = get_all_admin_ids()
     if not admin_list:
         return True
-    return user_id in admin_list
+    try:
+        uid = int(user_id)
+        if uid in [int(x) for x in admin_list if str(x).isdigit()]:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return str(user_id).strip() in [str(x).strip() for x in admin_list]
 
 def notify_all_admins(text, reply_markup=None):
-    for a_id in config.get("admin_ids", [7249511572, 7251749429]):
+    for a_id in get_all_admin_ids():
         send_tg_message(a_id, text, reply_markup=reply_markup)
+
+def delete_telegram_webhook():
+    """Deletes any existing webhook so getUpdates polling functions cleanly without 409 Conflict."""
+    url = f"{TG_BASE_URL}/deleteWebhook"
+    try:
+        resp = requests.post(url, json={"drop_pending_updates": False}, timeout=10)
+        res_json = resp.json()
+        if res_json.get("ok"):
+            logger.info("✅ Telegram Webhook cleared successfully (clean polling active).")
+            return True
+        else:
+            logger.warning(f"⚠️ deleteWebhook response: {res_json}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Error clearing Telegram webhook: {e}")
+        return False
 
 def send_tg_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
     url = f"{TG_BASE_URL}/sendMessage"
@@ -4537,6 +4592,10 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         )
         threading.Thread(target=execute_relay_handoff_sequence, args=("Manual Telegram Command",), daemon=True).start()
 
+    else:
+        # Fallback: ensure Telegram client spinner is always dismissed
+        answer_callback(callback_id)
+
 # ---------------------------------------------------------------------------
 # Document & File Upload Handler
 # ---------------------------------------------------------------------------
@@ -4891,16 +4950,69 @@ def handle_document_upload(chat_id, user_id, doc):
         )
 
 # ---------------------------------------------------------------------------
+# Safe Worker Handlers (Prevents thread crashes & ensures UI responsiveness)
+# ---------------------------------------------------------------------------
+def safe_handle_callback_query(callback_id, chat_id, user_id, message_id, data):
+    answered = False
+    try:
+        handle_callback_query(callback_id, chat_id, user_id, message_id, data)
+        answered = True
+    except Exception as e:
+        logger.error(f"❌ Error in handle_callback_query (data: {data}): {e}\n{traceback.format_exc()}")
+        try:
+            answer_callback(callback_id, "⚠️ Error processing button click", show_alert=True)
+            answered = True
+        except Exception:
+            pass
+    finally:
+        # Fallback to make 100% sure Telegram client spinner stops
+        if not answered:
+            try:
+                answer_callback(callback_id)
+            except Exception:
+                pass
+
+def safe_handle_text_message(chat_id, user_id, text):
+    try:
+        handle_text_message(chat_id, user_id, text)
+    except Exception as e:
+        logger.error(f"❌ Error in handle_text_message: {e}\n{traceback.format_exc()}")
+        try:
+            send_tg_message(chat_id, f"⚠️ An error occurred: {html.escape(str(e))}", reply_markup=get_main_menu_keyboard())
+        except Exception:
+            pass
+
+def safe_handle_document_upload(chat_id, user_id, doc):
+    try:
+        handle_document_upload(chat_id, user_id, doc)
+    except Exception as e:
+        logger.error(f"❌ Error in handle_document_upload: {e}\n{traceback.format_exc()}")
+        try:
+            send_tg_message(chat_id, f"⚠️ An error occurred with upload: {html.escape(str(e))}", reply_markup=get_main_menu_keyboard())
+        except Exception:
+            pass
+
+# ---------------------------------------------------------------------------
 # Polling Engine
 # ---------------------------------------------------------------------------
 def telegram_polling_loop():
-    logger.info("🤖 Real-Time Telegram Polling Engine active...")
-    offset = 0
+    logger.info("🤖 Real-Time Telegram Polling Engine starting...")
+    # 1. Clear any active webhook so getUpdates receives updates
+    delete_telegram_webhook()
     
+    offset = 0
+    session = requests.Session()
+    allowed_updates_json = json.dumps(["message", "edited_message", "callback_query"])
+    
+    logger.info("🤖 Real-Time Telegram Polling Engine active & ready for commands and buttons...")
     while IS_RUNNING:
         try:
-            url = f"{TG_BASE_URL}/getUpdates?offset={offset}&timeout=20"
-            resp = requests.get(url, timeout=25)
+            params = {
+                "offset": offset,
+                "timeout": 20,
+                "allowed_updates": allowed_updates_json
+            }
+            resp = session.get(f"{TG_BASE_URL}/getUpdates", params=params, timeout=(10, 30))
             
             if resp.status_code == 200:
                 data = resp.json()
@@ -4911,16 +5023,20 @@ def telegram_polling_loop():
                         # Handle Callback Queries (Button Clicks) in non-blocking real-time thread
                         if "callback_query" in update:
                             cq = update["callback_query"]
-                            cb_id = cq["id"]
-                            c_user = cq["from"]["id"]
-                            c_chat = cq["message"]["chat"]["id"]
-                            c_msg_id = cq["message"]["message_id"]
+                            cb_id = cq.get("id")
+                            from_user = cq.get("from", {})
+                            c_user = from_user.get("id")
+                            msg = cq.get("message") or {}
+                            c_chat = msg.get("chat", {}).get("id") or c_user
+                            c_msg_id = msg.get("message_id")
                             c_data = cq.get("data", "")
-                            threading.Thread(
-                                target=handle_callback_query,
-                                args=(cb_id, c_chat, c_user, c_msg_id, c_data),
-                                daemon=True
-                            ).start()
+                            
+                            if cb_id and c_user:
+                                threading.Thread(
+                                    target=safe_handle_callback_query,
+                                    args=(cb_id, c_chat, c_user, c_msg_id, c_data),
+                                    daemon=True
+                                ).start()
                         
                         # Handle Normal Messages in non-blocking real-time thread
                         elif "message" in update:
@@ -4933,16 +5049,38 @@ def telegram_polling_loop():
                             
                             if "text" in msg:
                                 threading.Thread(
-                                    target=handle_text_message,
+                                    target=safe_handle_text_message,
                                     args=(chat_id, user_id, msg["text"]),
                                     daemon=True
                                 ).start()
                             elif "document" in msg:
                                 threading.Thread(
-                                    target=handle_document_upload,
+                                    target=safe_handle_document_upload,
                                     args=(chat_id, user_id, msg["document"]),
                                     daemon=True
                                 ).start()
+            elif resp.status_code == 409:
+                err_text = resp.text.lower()
+                if "webhook" in err_text:
+                    logger.warning("⚠️ Webhook conflict detected (409). Calling deleteWebhook...")
+                    delete_telegram_webhook()
+                    time.sleep(2)
+                else:
+                    logger.warning("⚠️ Bot instance conflict (409) - another runner may be shutting down. Backing off 3s...")
+                    time.sleep(3)
+            elif resp.status_code == 429:
+                try:
+                    retry_after = int(resp.json().get("parameters", {}).get("retry_after", 5))
+                except Exception:
+                    retry_after = 5
+                logger.warning(f"⚠️ Telegram rate limit (429). Sleeping {retry_after}s...")
+                time.sleep(retry_after)
+            else:
+                logger.warning(f"⚠️ Telegram getUpdates returned HTTP {resp.status_code}: {resp.text[:150]}")
+                time.sleep(2)
+        except requests.exceptions.Timeout:
+            # Normal long-polling timeout, continue next cycle immediately
+            continue
         except Exception as e:
             logger.error(f"Telegram polling error: {e}")
             time.sleep(2)
@@ -4997,12 +5135,24 @@ def main():
         config["active_scripts"] = active_list
         save_config(config)
 
+    # Filter out any non-existent scripts to prevent startup errors
+    valid_active = []
     if active_list:
-        logger.info(f"🔄 Auto-resuming {len(active_list)} active scripts across relay handoff/boot: {active_list}")
-        def delayed_multi_resume(scripts_to_run):
-            time.sleep(2.0)
+        for s in active_list:
+            clean_s = os.path.normpath(s.replace("scripts/", "").lstrip("/")).replace("\\", "/")
+            full_s = os.path.join(SCRIPTS_DIR, clean_s)
+            if os.path.exists(full_s) or os.path.exists(os.path.join(WORKSPACE_DIR, s)):
+                valid_active.append(s)
+        if len(valid_active) != len(active_list):
+            logger.info(f"Pruned {len(active_list) - len(valid_active)} deleted scripts from active_scripts.")
+            config["active_scripts"] = valid_active
+            save_config(config)
+
+    def delayed_boot_notification(scripts_to_run):
+        time.sleep(1.5)
+        if scripts_to_run:
             notify_all_admins(
-                f"🔄 <b>Cloud Server Online / Restarted:</b>\n"
+                f"🔄 <b>Cloud Server Online [Run #{RUN_ID}]:</b>\n"
                 f"Auto-resuming {len(scripts_to_run)} scripts in parallel:\n"
                 + "\n".join([f"• <code>{s}</code>" for s in scripts_to_run])
             )
@@ -5018,9 +5168,24 @@ def main():
                 else:
                     notify_all_admins(f"⚠️ <b>Auto-resume error for <code>{s}</code>:</b>\n{msg}")
                 time.sleep(0.5)
-            if success_count > 0:
-                notify_all_admins(f"🟢 <b>{success_count}/{len(scripts_to_run)} scripts are now active and running in parallel!</b>", reply_markup=get_main_menu_keyboard())
-        threading.Thread(target=delayed_multi_resume, args=(active_list,), daemon=True).start()
+            notify_all_admins(
+                f"🟢 <b>Cloud Server Online [Run #{RUN_ID}]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Scripts Running:</b> <code>{success_count}/{len(scripts_to_run)}</code>\n"
+                f"• <b>Status:</b> Controller Daemon Ready",
+                reply_markup=get_main_menu_keyboard()
+            )
+        else:
+            notify_all_admins(
+                f"🟢 <b>Cloud Server Online [Run #{RUN_ID}]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ <b>Controller Daemon:</b> Active & Ready\n"
+                f"📂 <b>Workspace:</b> <code>{REPO}</code>\n\n"
+                f"<i>Use the control panel below to run scripts or manage your server:</i>",
+                reply_markup=get_main_menu_keyboard()
+            )
+
+    threading.Thread(target=delayed_boot_notification, args=(valid_active,), daemon=True).start()
 
     # Start Telegram polling and Memory Cleaner threads
     tg_thread = threading.Thread(target=telegram_polling_loop, daemon=True, name="TGPolling")

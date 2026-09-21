@@ -18,3 +18,7 @@ temp_*
 *.7z
 *.tar.gz
 *.tgz
+bash
+push_to_github.py
+bot.db
+bot.log
