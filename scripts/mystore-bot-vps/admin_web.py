@@ -550,18 +550,8 @@ async def handle_upload_release_asset(request):
                 return False, f"Upload failed: {err_text}"
 
             # Completed successfully!
-            UPLOAD_PROGRESS[upload_id] = {
-                "phase": "completed",
-                "percent": 100,
-                "loaded": total_file_size,
-                "total": total_file_size,
-                "speed": 0,
-                "eta": 0,
-                "status": "Binary asset successfully archived to Cloud Storage (MTProto Engine)!",
-                "updated_at": time.time()
-            }
-
-            return True, {
+            res_payload = {
+                "success": True,
                 "release": rel_obj or {"tag_name": tag, "name": title or tag},
                 "asset": gh_asset_obj or {"browser_download_url": dl_url, "name": clean_filename},
                 "download_url": dl_url,
@@ -570,6 +560,20 @@ async def handle_upload_release_asset(request):
                 "filename": clean_filename,
                 "size_mb": round(total_file_size / (1024 * 1024), 2)
             }
+
+            UPLOAD_PROGRESS[upload_id] = {
+                "phase": "completed",
+                "percent": 100,
+                "loaded": total_file_size,
+                "total": total_file_size,
+                "speed": 0,
+                "eta": 0,
+                "status": "Binary asset successfully archived to Cloud Storage (MTProto Engine)!",
+                "result": res_payload,
+                "updated_at": time.time()
+            }
+
+            return True, res_payload
         finally:
             try:
                 if os.path.exists(temp_file):
@@ -579,10 +583,16 @@ async def handle_upload_release_asset(request):
             except Exception:
                 pass
 
-    ok, result = await asyncio.to_thread(_process_binary_upload)
-    if ok:
-        return web.json_response({"success": True, **result})
-    return web.json_response({"error": str(result)}, status=500)
+    # Launch background worker immediately to avoid Cloudflare 100s HTTP 524 timeout
+    worker_thread = threading.Thread(target=_process_binary_upload, daemon=True, name=f"UploadWorker-{upload_id}")
+    worker_thread.start()
+
+    return web.json_response({
+        "success": True,
+        "status": "processing",
+        "upload_id": upload_id,
+        "message": "File received by server. Archiving to Telegram Storage Channel in background..."
+    })
 
 
 async def handle_get_upload_progress(request):
