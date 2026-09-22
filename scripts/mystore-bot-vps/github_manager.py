@@ -9,11 +9,12 @@ import mimetypes
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "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")
-GITHUB_OWNER = os.getenv("GITHUB_OWNER", "myreleasesrpo0272")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "appstore")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_OWNER = os.getenv("GITHUB_OWNER", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")
 
 
 class ProgressFileReader:

@@ -22,7 +22,9 @@ _shots_lock = threading.Lock()
 # Safe callback answer wrapper to avoid 400 timeout exceptions
 def safe_answer_callback(call, text=None, show_alert=False):
     try:
-        bot.answer_callback_query(call.id, text=text, show_alert=show_alert)
+        call_id = getattr(call, 'id', call)
+        if call_id:
+            bot.answer_callback_query(call_id, text=text, show_alert=show_alert)
     except Exception:
         pass
 
@@ -67,6 +69,8 @@ from keyboards import (
     skip_step_keyboard,
     screenshots_step_keyboard,
     is_valid_telegram_button_url,
+    user_store_keyboard,
+    user_app_detail_keyboard,
 )
 
 # Configuration & Security Whitelist
@@ -96,14 +100,52 @@ apihelper.SESSION = _session
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", num_threads=16)
 
-# Globally wrap answer_callback_query to safely catch expired callback timeouts (Telegram Error 400)
+# --------------------------------------------------------------------------
+# Bulletproof API Wrappers for TeleBot to prevent any polling/thread crashes
+# --------------------------------------------------------------------------
 _orig_answer_callback_query = bot.answer_callback_query
-def _safe_answer_callback_query(*args, **kwargs):
+
+def safe_answer_callback_query(callback_query_id, text=None, show_alert=None, url=None, cache_time=None):
+    """Guaranteed safe answer_callback_query that catches 400 Bad Request, expired query, and timeout errors"""
     try:
-        return _orig_answer_callback_query(*args, **kwargs)
+        return _orig_answer_callback_query(
+            callback_query_id,
+            text=text,
+            show_alert=show_alert,
+            url=url,
+            cache_time=cache_time
+        )
     except Exception:
         return False
-bot.answer_callback_query = _safe_answer_callback_query
+
+bot.answer_callback_query = safe_answer_callback_query
+
+_orig_edit_message_text = bot.edit_message_text
+
+def safe_edit_message_text_wrapper(*args, **kwargs):
+    """Guaranteed safe edit_message_text that ignores 'message is not modified' and falls back to send_message"""
+    try:
+        return _orig_edit_message_text(*args, **kwargs)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "message is not modified" in err_msg:
+            return None
+        print(f"⚠️ [edit_message_text notice]: {e}", flush=True)
+        chat_id = kwargs.get("chat_id")
+        text = kwargs.get("text")
+        if not chat_id and len(args) > 1:
+            text = args[0]
+            chat_id = args[1]
+        reply_markup = kwargs.get("reply_markup") or (args[7] if len(args) > 7 else None)
+        parse_mode = kwargs.get("parse_mode", "HTML")
+        if chat_id and text:
+            try:
+                return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+            except Exception as se:
+                print(f"⚠️ [fallback send_message error]: {se}", flush=True)
+        return None
+
+bot.edit_message_text = safe_edit_message_text_wrapper
 
 # Temporary in-memory user conversation states
 user_states = {}
@@ -111,7 +153,10 @@ user_states = {}
 
 def is_admin(user_id):
     """Check if Telegram user is authorized admin"""
-    return user_id in ADMIN_IDS
+    try:
+        return int(user_id) in ADMIN_IDS
+    except (ValueError, TypeError):
+        return False
 
 
 def smart_download_telegram_document(message, doc, target_path, status_msg=None):
@@ -159,43 +204,79 @@ def smart_download_telegram_document(message, doc, target_path, status_msg=None)
 
 
 # --------------------------------------------------------------------------
-# ONLY Command: /start
+# Main Command: /start, /menu, /admin, /help
 # --------------------------------------------------------------------------
-@bot.message_handler(commands=["start", "menu", "admin"])
+@bot.message_handler(commands=["start", "menu", "admin", "help"])
 def handle_start(message):
     user_id = message.from_user.id
-    if not is_admin(user_id):
-        log_activity("Unauthorized /start attempt", user_id=user_id, details=f"Chat: {message.chat.id}")
-        bot.reply_to(
-            message,
-            "⛔ <b>Access Denied</b>\n\n"
-            "You are not authorized to access this private admin console.\n"
-            f"Your Telegram ID: <code>{user_id}</code>"
-        )
-        return
+    log_activity("User triggered /start", user_id=user_id, details=f"Chat: {message.chat.id}")
 
-    log_activity("Admin opened panel (/start)", user_id=user_id, details=f"Chat: {message.chat.id}")
-
-    # Clear any active wizard state
+    # Clear any active wizard state and step handlers
     user_states.pop(user_id, None)
+    try:
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+    except Exception:
+        pass
 
     apps = firebase_mgr.get_all_apps()
     dev = firebase_mgr.get_developer_profile()
     dev_name = dev.get("name", "R3V_X")
 
-    welcome_text = (
-        f"👋 <b>Welcome {dev_name}!</b>\n\n"
-        f"🏪 <b>MyStore Admin Control Panel</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📱 <b>Live Apps in Catalog:</b> <code>{len(apps)}</code>\n"
-        f"🔥 <b>Firebase Database:</b> <code>Connected (Realtime)</code>\n"
-        f"🐙 <b>GitHub Releases API:</b> <code>Ready ({github_mgr.owner}/{github_mgr.repo})</code>\n"
-        f"🔒 <b>Security Token:</b> <code>Active & Verified</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Select an action below using buttons:</i>"
-    )
+    if is_admin(user_id):
+        log_activity("Admin opened panel (/start)", user_id=user_id, details=f"Chat: {message.chat.id}")
+        welcome_text = (
+            f"👋 <b>Welcome {dev_name}!</b>\n\n"
+            f"🏪 <b>MyStore Admin Control Panel</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 <b>Live Apps in Catalog:</b> <code>{len(apps)}</code>\n"
+            f"🔥 <b>Firebase Database:</b> <code>Connected (Realtime)</code>\n"
+            f"🐙 <b>GitHub Releases API:</b> <code>Ready ({github_mgr.owner}/{github_mgr.repo})</code>\n"
+            f"🔒 <b>Security Token:</b> <code>Active & Verified</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Select an action below using buttons:</i>"
+        )
+        bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard())
+    else:
+        log_activity("Visitor opened public store (/start)", user_id=user_id, details=f"Chat: {message.chat.id}")
+        user_welcome_text = (
+            f"👋 <b>Welcome to MyStore!</b>\n\n"
+            f"🏪 <b>Explore & Download Apps by {dev_name}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 <b>Published Apps:</b> <code>{len(apps)}</code>\n"
+            f"⚡ <i>Fast downloads, verified APKs, and cloud utilities.</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Choose an option below:</i>"
+        )
+        bot.send_message(message.chat.id, user_welcome_text, reply_markup=user_store_keyboard(STORE_WEB_URL))
 
-    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard())
+
+@bot.message_handler(commands=["auth", "login"])
+def handle_auth_command(message):
+    user_id = message.from_user.id
+    parts = (message.text or "").strip().split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(
+            message,
+            "🔑 <b>Admin Authentication</b>\n\n"
+            "Usage: <code>/auth &lt;security_token&gt;</code>\n\n"
+            f"Your Telegram ID: <code>{user_id}</code>"
+        )
+        return
+
+    token = parts[1].strip()
+    if token == ADMIN_SECURITY_TOKEN:
+        if user_id not in ADMIN_IDS:
+            ADMIN_IDS.append(user_id)
+        log_activity("Admin authenticated successfully via token", user_id=user_id)
+        bot.reply_to(
+            message,
+            "✅ <b>Authentication Successful!</b>\n\n"
+            "You have been granted full Admin access to MyStore Control Panel.",
+            reply_markup=main_menu_keyboard()
+        )
+    else:
+        log_activity("Admin auth failed (wrong token)", user_id=user_id)
+        bot.reply_to(message, "❌ <b>Invalid Security Token.</b> Access denied.")
 
 
 # --------------------------------------------------------------------------
@@ -204,17 +285,216 @@ def handle_start(message):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback_router(call):
     user_id = call.from_user.id
-    if not is_admin(user_id):
-        log_activity("Unauthorized button tap", user_id=user_id, details=f"Data: {call.data}")
-        bot.answer_callback_query(call.id, "⛔ Unauthorized", show_alert=True)
+    data = getattr(call, "data", "") or ""
+    username = getattr(call.from_user, "username", "") or "unknown"
+    log_activity(f"Button Clicked [{data}]", user_id=user_id, details=f"User: @{username}")
+
+    # Immediately acknowledge button click so Telegram client stops loading spinner
+    safe_answer_callback(call)
+
+    try:
+        _handle_callback_router_impl(call)
+    except Exception as router_err:
+        log_activity("Error in callback router", details=str(router_err))
+        import traceback
+        traceback.print_exc()
+        safe_answer_callback(call, "⚠️ Error processing button action. Please retry.", show_alert=True)
+
+
+def _handle_callback_router_impl(call):
+    user_id = call.from_user.id
+    data = call.data or ""
+
+    # -------------------------------------------------------------
+    # Public / User Store Handlers (Accessible to ALL users)
+    # -------------------------------------------------------------
+    if data == "user:home":
+        user_states.pop(user_id, None)
+        apps = firebase_mgr.get_all_apps()
+        dev = firebase_mgr.get_developer_profile()
+        dev_name = dev.get("name", "R3V_X")
+        text = (
+            f"👋 <b>Welcome to MyStore!</b>\n\n"
+            f"🏪 <b>Explore & Download Apps by {dev_name}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 <b>Published Apps:</b> <code>{len(apps)}</code>\n"
+            f"⚡ <i>Fast downloads, verified APKs, and cloud utilities.</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Choose an option below:</i>"
+        )
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=user_store_keyboard(STORE_WEB_URL))
         return
 
-    data = call.data
-    log_activity("Button Clicked", user_id=user_id, details=f"Callback: {data}")
+    elif data == "user:browse":
+        apps = firebase_mgr.get_all_apps()
+        if not apps:
+            bot.edit_message_text(
+                "📭 <b>No applications currently in catalog.</b>\n\nCheck back soon for new releases!",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=user_store_keyboard(STORE_WEB_URL)
+            )
+            return
+
+        text = f"📱 <b>MyStore Catalog ({len(apps)} Apps):</b>\n\nTap any app to view details & download links:"
+        markup = app_list_keyboard(apps, action_prefix="user_view_app")
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    elif data.startswith("user_view_app:"):
+        app_id = data.split(":", 1)[1]
+        app = firebase_mgr.get_app(app_id)
+        if not app:
+            safe_answer_callback(call, "App not found!", show_alert=True)
+            return
+
+        featured_tag = "🌟 Featured App\n" if app.get("featured") else ""
+        pinned_tag = f"📌 Top Pick #{app.get('pinnedOrder', 1)}\n" if app.get("pinned") else ""
+        badge_tag = f"🏷️ [{app.get('badge')}]\n" if app.get("badge") else ""
+        shots_count = len(app.get("screenshots", []))
+        tagline = app.get("tagline", "")
+        desc = app.get("description", "")
+        if len(desc) > 300:
+            desc = desc[:297] + "..."
+
+        detail_text = (
+            f"📱 <b>{app.get('name')}</b>\n"
+            f"{pinned_tag}{featured_tag}{badge_tag}"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏷️ <b>Version:</b> <code>{app.get('version', 'v1.0')}</code>\n"
+            f"📂 <b>Category:</b> <code>{app.get('category', 'Apps')}</code>\n"
+            f"💾 <b>Size:</b> <code>{app.get('size', 'N/A')}</code>\n"
+            f"🖼️ <b>Screenshots:</b> <code>{shots_count} available</code>\n"
+            f"📅 <b>Updated:</b> <code>{app.get('updatedDate', 'Recently')}</code>\n"
+        )
+        if tagline:
+            detail_text += f"\n💬 <i>{tagline}</i>\n"
+        if desc:
+            detail_text += f"\n📝 <b>Overview:</b>\n{desc}\n"
+
+        bot.edit_message_text(detail_text, call.message.chat.id, call.message.message_id, reply_markup=user_app_detail_keyboard(app, STORE_WEB_URL))
+        return
+
+    elif data == "user:featured":
+        apps = firebase_mgr.get_all_apps()
+        feat_apps = [a for a in apps if a.get("featured") or a.get("pinned")]
+        if not feat_apps:
+            feat_apps = apps[:5]
+        if not feat_apps:
+            bot.edit_message_text("📭 No featured apps right now.", call.message.chat.id, call.message.message_id, reply_markup=user_store_keyboard(STORE_WEB_URL))
+            return
+        text = "🌟 <b>Featured & Top Picks:</b>\n\nTap an app to view details & download:"
+        markup = app_list_keyboard(feat_apps, action_prefix="user_view_app")
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    elif data == "user:dev_profile":
+        dev = firebase_mgr.get_developer_profile()
+        dev_name = dev.get("name", "R3V_X")
+        bio = dev.get("bio", "Independent Mobile & Web Developer")
+        website = dev.get("website", dev.get("portfolio", "https://aboutmee.pages.dev/"))
+        markup = InlineKeyboardMarkup(row_width=2)
+        btns = []
+        if is_valid_telegram_button_url(website):
+            btns.append(InlineKeyboardButton("🌐 Portfolio", url=website))
+        for s in dev.get("socials", []):
+            s_url = s.get("url")
+            if s_url and is_valid_telegram_button_url(s_url):
+                btns.append(InlineKeyboardButton(f"🔗 {s.get('name', 'Social')}", url=s_url))
+        if btns:
+            markup.add(*btns)
+        markup.add(InlineKeyboardButton("🏠 Store Home", callback_data="user:home"))
+
+        dev_text = (
+            f"👤 <b>Developer Profile: {dev_name}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 {bio}\n\n"
+            f"🌐 <b>Website:</b> {website}\n"
+        )
+        bot.edit_message_text(dev_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    elif data == "user:contact":
+        dev = firebase_mgr.get_developer_profile()
+        markup = InlineKeyboardMarkup(row_width=1)
+        contact_url = "https://t.me/R3V_X"
+        for s in dev.get("socials", []):
+            if "contact" in s.get("name", "").lower() or "telegram" in s.get("name", "").lower():
+                contact_url = s.get("url", contact_url)
+        if is_valid_telegram_button_url(contact_url):
+            markup.add(InlineKeyboardButton("💬 Message Developer on Telegram", url=contact_url))
+        markup.add(InlineKeyboardButton("🏠 Store Home", callback_data="user:home"))
+
+        text = (
+            "💬 <b>Get in Touch & Community</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Need support, want to report a bug, or have a feature request?\n"
+            "Reach out directly to the developer!"
+        )
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    elif data == "user:web_info":
+        markup = InlineKeyboardMarkup(row_width=1)
+        if is_valid_telegram_button_url(STORE_WEB_URL):
+            markup.add(InlineKeyboardButton("🌐 Open Web Store", url=STORE_WEB_URL))
+        markup.add(InlineKeyboardButton("🏠 Store Home", callback_data="user:home"))
+        text = (
+            f"🌐 <b>MyStore Web Application</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"URL: <code>{STORE_WEB_URL}</code>\n\n"
+            f"Visit the store on any browser or install it as a PWA on your home screen!"
+        )
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    elif data == "user:admin_login":
+        user_states[user_id] = {"stage": "auth_token_input"}
+        text = (
+            "🔐 <b>Admin Console Authentication</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your Telegram ID: <code>{user_id}</code>\n\n"
+            "Please send the <b>Admin Security Token</b> in this chat or use command:\n"
+            "<code>/auth &lt;security_token&gt;</code>"
+        )
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("❌ Cancel", callback_data="user:home"))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # -------------------------------------------------------------
+    # ADMIN Authorization Check for All Control Panel Functions
+    # -------------------------------------------------------------
+    if not is_admin(user_id):
+        # If a visitor clicks back to main menu, gracefully show user home
+        if data == "menu:main":
+            user_states.pop(user_id, None)
+            apps = firebase_mgr.get_all_apps()
+            dev = firebase_mgr.get_developer_profile()
+            dev_name = dev.get("name", "R3V_X")
+            user_text = (
+                f"👋 <b>Welcome to MyStore!</b>\n\n"
+                f"🏪 <b>Explore & Download Apps by {dev_name}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Published Apps:</b> <code>{len(apps)}</code>\n"
+                f"⚡ <i>Fast downloads, verified APKs, and cloud utilities.</i>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Choose an option below:</i>"
+            )
+            bot.edit_message_text(user_text, call.message.chat.id, call.message.message_id, reply_markup=user_store_keyboard(STORE_WEB_URL))
+            return
+
+        log_activity("Unauthorized button tap", user_id=user_id, details=f"Data: {data}")
+        safe_answer_callback(call, "🔒 Unauthorized: Admin console access required.", show_alert=True)
+        return
 
     # Return to Main Menu
     if data == "menu:main":
         user_states.pop(user_id, None)
+        try:
+            bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        except Exception:
+            pass
         apps = firebase_mgr.get_all_apps()
         dev = firebase_mgr.get_developer_profile()
         dev_name = dev.get("name", "R3V_X")
@@ -227,11 +507,8 @@ def handle_callback_router(call):
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<i>Select an action below:</i>"
         )
-        try:
-            bot.edit_message_text(menu_text, call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard())
-        except Exception:
-            bot.send_message(call.message.chat.id, menu_text, reply_markup=main_menu_keyboard())
-        bot.answer_callback_query(call.id)
+        bot.edit_message_text(menu_text, call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard())
+        safe_answer_callback(call)
         return
 
     # 1. Add New Project (Choose Type or Custom Category)
@@ -1170,7 +1447,64 @@ def handle_callback_router(call):
             f"<i>Use buttons below to edit profile fields:</i>"
         )
         bot.edit_message_text(profile_text, call.message.chat.id, call.message.message_id, reply_markup=developer_profile_keyboard(dev))
-        bot.answer_callback_query(call.id)
+        safe_answer_callback(call)
+        return
+
+    # Edit Developer Profile Fields
+    elif data == "dev:edit_name":
+        user_states[user_id] = {"stage": "dev_edit_name"}
+        text = (
+            "✏️ <b>Edit Developer Name / Handle</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Please reply with the new <b>Developer Display Name</b>:\n"
+            "<i>(e.g., 'R3V_X' or 'Alex Dev')</i>"
+        )
+        bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        msg = bot.send_message(call.message.chat.id, text, reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_name)
+        safe_answer_callback(call)
+        return
+
+    elif data == "dev:edit_bio":
+        user_states[user_id] = {"stage": "dev_edit_bio"}
+        text = (
+            "📝 <b>Edit Developer Bio / Tagline</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Please reply with the new <b>Bio Description</b>:\n"
+            "<i>(Describe your mission, apps, and expertise)</i>"
+        )
+        bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        msg = bot.send_message(call.message.chat.id, text, reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_bio)
+        safe_answer_callback(call)
+        return
+
+    elif data == "dev:edit_portfolio":
+        user_states[user_id] = {"stage": "dev_edit_portfolio"}
+        text = (
+            "🌐 <b>Edit Developer Portfolio URL</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Please reply with your <b>Website / Portfolio URL</b>:\n"
+            "<i>(e.g., 'https://aboutmee.pages.dev')</i>"
+        )
+        bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        msg = bot.send_message(call.message.chat.id, text, reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_portfolio)
+        safe_answer_callback(call)
+        return
+
+    elif data == "dev:edit_telegram":
+        user_states[user_id] = {"stage": "dev_edit_telegram"}
+        text = (
+            "💬 <b>Edit Telegram Contact Link</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Please reply with your <b>Telegram Link or Handle</b>:\n"
+            "<i>(e.g., '@R3V_X' or 'https://t.me/R3V_X')</i>"
+        )
+        bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        msg = bot.send_message(call.message.chat.id, text, reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_telegram)
+        safe_answer_callback(call)
         return
 
     # 6. Secure Database Export Suite
@@ -1389,7 +1723,68 @@ def handle_callback_router(call):
             f"🔒 <b>Security Token:</b> <code>Matches Web .env</code>"
         )
         bot.edit_message_text(health_text, call.message.chat.id, call.message.message_id, reply_markup=back_to_main_keyboard())
+        safe_answer_callback(call)
         return
+
+    # 8. Set Featured App Menu
+    elif data == "menu:set_featured":
+        apps = firebase_mgr.get_all_apps()
+        if not apps:
+            bot.edit_message_text("📭 <b>No applications found in catalog.</b>", call.message.chat.id, call.message.message_id, reply_markup=back_to_main_keyboard())
+            safe_answer_callback(call)
+            return
+
+        text = (
+            "🌟 <b>Featured App Manager</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Featured apps are prominently spotlighted on the store home hero banner.\n\n"
+            "Select an app below to toggle its <b>Featured</b> status in real-time:"
+        )
+        markup = InlineKeyboardMarkup(row_width=1)
+        for a in apps:
+            a_id = a.get("id", "")
+            name = a.get("name", "Unnamed")
+            is_feat = bool(a.get("featured"))
+            star = "⭐ [FEATURED] " if is_feat else "☆ "
+            markup.add(InlineKeyboardButton(f"{star}{name} ({a.get('version', 'v1.0')})", callback_data=f"feature_app:{a_id}"))
+        markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu:main"))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        safe_answer_callback(call)
+        return
+
+    # 9. Delete App Selection List
+    elif data == "menu:delete_app_list":
+        apps = firebase_mgr.get_all_apps()
+        if not apps:
+            bot.edit_message_text("📭 <b>No applications found to delete.</b>", call.message.chat.id, call.message.message_id, reply_markup=back_to_main_keyboard())
+            safe_answer_callback(call)
+            return
+
+        text = (
+            "🗑️ <b>Select a Project to Delete:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Deleting an app will remove it from Firebase database and web catalog immediately in real-time.</i>"
+        )
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=app_list_keyboard(apps, action_prefix="confirm_delete"))
+        safe_answer_callback(call)
+        return
+
+    # Fallback for category selector callbacks
+    elif data.startswith("cat:"):
+        cat_param = data.split(":", 1)[1]
+        safe_answer_callback(call, f"Category: {cat_param}")
+        return
+
+    # Fallback for any unhandled button callback
+    else:
+        log_activity("Unhandled callback received", user_id=user_id, details=f"Data: {data}")
+        safe_answer_callback(call, "Option received.", show_alert=False)
+        return
+
+
+
+
+
 
 
 # --------------------------------------------------------------------------
@@ -3085,6 +3480,151 @@ def handle_unified_doc_stream(message):
 
 
 # --------------------------------------------------------------------------
+# Developer Profile Input Processors
+# --------------------------------------------------------------------------
+
+def process_dev_edit_name(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if not state or state.get("stage") != "dev_edit_name":
+        return
+    name = (message.text or "").strip()
+    if not name:
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        msg = bot.send_message(message.chat.id, "⚠️ Name cannot be empty. Please enter a valid display name:", reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_name)
+        return
+    user_states.pop(user_id, None)
+    firebase_mgr.update_developer_profile({"name": name})
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>Developer Name Updated:</b> <code>{name}</code>\n\n🔥 <i>Live on Web Store & Bot in real-time!</i>",
+        reply_markup=back_to_main_keyboard()
+    )
+
+
+def process_dev_edit_bio(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if not state or state.get("stage") != "dev_edit_bio":
+        return
+    bio = (message.text or "").strip()
+    if not bio:
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        msg = bot.send_message(message.chat.id, "⚠️ Bio cannot be empty. Please enter your bio:", reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_bio)
+        return
+    user_states.pop(user_id, None)
+    firebase_mgr.update_developer_profile({"bio": bio, "tagline": bio})
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>Developer Bio & Tagline Updated!</b>\n\n🔥 <i>Live on Web Store & Bot in real-time!</i>",
+        reply_markup=back_to_main_keyboard()
+    )
+
+
+def process_dev_edit_portfolio(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if not state or state.get("stage") != "dev_edit_portfolio":
+        return
+    url = (message.text or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        msg = bot.send_message(message.chat.id, "⚠️ Invalid URL. Please provide a link starting with http:// or https://", reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_portfolio)
+        return
+    user_states.pop(user_id, None)
+    firebase_mgr.update_developer_profile({"website": url, "portfolio": url})
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>Portfolio URL Updated:</b> <code>{url}</code>\n\n🔥 <i>Live on Web Store & Bot in real-time!</i>",
+        reply_markup=back_to_main_keyboard()
+    )
+
+
+def process_dev_edit_telegram(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    if not state or state.get("stage") != "dev_edit_telegram":
+        return
+    raw = (message.text or "").strip()
+    if not raw:
+        bot.clear_step_handler_by_chat_id(message.chat.id)
+        msg = bot.send_message(message.chat.id, "⚠️ Please provide your Telegram link or username:", reply_markup=cancel_wizard_keyboard())
+        bot.register_next_step_handler(msg, process_dev_edit_telegram)
+        return
+    user_states.pop(user_id, None)
+    tg_url = raw if raw.startswith("http") else f"https://t.me/{raw.lstrip('@')}"
+    dev = firebase_mgr.get_developer_profile()
+    socials = dev.get("socials", [])
+    found = False
+    for s in socials:
+        if "telegram" in s.get("name", "").lower() or "contact" in s.get("name", "").lower():
+            s["url"] = tg_url
+            found = True
+            break
+    if not found:
+        socials.append({"icon": "telegram", "name": "Contact Dev", "url": tg_url})
+    firebase_mgr.update_developer_profile({"socials": socials})
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>Telegram Link Updated:</b> <code>{tg_url}</code>\n\n🔥 <i>Live on Web Store & Bot in real-time!</i>",
+        reply_markup=back_to_main_keyboard()
+    )
+
+
+# --------------------------------------------------------------------------
+# General Interactive Text Handler
+# --------------------------------------------------------------------------
+@bot.message_handler(content_types=['text'])
+def handle_general_text_message(message):
+    user_id = message.from_user.id
+    text = (message.text or "").strip()
+
+    # Handle admin security token authentication from user:admin_login
+    if user_states.get(user_id, {}).get("stage") == "auth_token_input":
+        user_states.pop(user_id, None)
+        if text == ADMIN_SECURITY_TOKEN:
+            if user_id not in ADMIN_IDS:
+                ADMIN_IDS.append(user_id)
+            log_activity("Admin authenticated via text token", user_id=user_id)
+            bot.send_message(
+                message.chat.id,
+                "✅ <b>Authentication Successful!</b>\n\n"
+                "You have been granted full Admin access to MyStore Control Panel.",
+                reply_markup=main_menu_keyboard()
+            )
+        else:
+            log_activity("Admin auth failed (wrong token)", user_id=user_id)
+            bot.send_message(
+                message.chat.id,
+                "❌ <b>Invalid Security Token.</b> Access denied.",
+                reply_markup=user_store_keyboard(STORE_WEB_URL)
+            )
+        return
+
+    # Handle commands if passed as plain text
+    if text.startswith("/auth") or text.startswith("/login"):
+        handle_auth_command(message)
+        return
+
+    # Default fallback: display the appropriate interactive menu
+    if is_admin(user_id):
+        bot.send_message(
+            message.chat.id,
+            "💡 <i>Tip: Use the interactive buttons below to manage your store:</i>",
+            reply_markup=main_menu_keyboard()
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "👋 <b>Welcome to MyStore!</b>\n<i>Browse our app catalog using the buttons below:</i>",
+            reply_markup=user_store_keyboard(STORE_WEB_URL)
+        )
+
+
+# --------------------------------------------------------------------------
 # Main Entry Point
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -3092,19 +3632,24 @@ if __name__ == "__main__":
     print(f"👑 Authorized Admins: {ADMIN_IDS}")
     print(f"🐙 GitHub Target: {github_mgr.owner}/{github_mgr.repo}")
     print(f"🔥 Firebase Database: {firebase_mgr.db_url}")
-
-    # Proactively clear any active webhook & stale pending updates so polling never crashes with 409 Conflict
-    try:
-        print("🔄 Clearing any active webhook & pending updates...")
-        bot.delete_webhook(drop_pending_updates=True)
-        time.sleep(1)
-        print("✅ Telegram webhook cleared successfully.")
-    except Exception as e:
-        print(f"⚠️ Notice when clearing webhook: {e}")
-
     print(f"🚀 Bot is polling for commands...")
-    
+
     try:
-        bot.infinity_polling(timeout=20, long_polling_timeout=20, restart_on_change=False)
+        # Reset any conflicting webhooks and drop stale updates to prevent 409 Conflict & 400 Query Timeout
+        try:
+            bot.delete_webhook(drop_pending_updates=True)
+            print("✨ Cleaned webhook & dropped stale pending updates.")
+        except Exception as we:
+            print(f"⚠️ Webhook reset notice: {we}")
+
+        allowed = telebot.util.update_types
+        print(f"📡 Polling initialized with {len(allowed)} allowed update types (including callback_query).")
+        bot.infinity_polling(
+            timeout=20,
+            long_polling_timeout=20,
+            allowed_updates=allowed,
+            restart_on_change=False
+        )
     except (KeyboardInterrupt, SystemExit):
         print("\n🛑 Bot stopped gracefully.")
+

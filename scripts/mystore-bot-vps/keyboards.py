@@ -33,6 +33,9 @@ def main_menu_keyboard():
         InlineKeyboardButton("⚡ Store Health & Ping", callback_data="menu:health_check"),
         InlineKeyboardButton("🗑️ Delete Project", callback_data="menu:delete_app_list"),
     )
+    markup.add(
+        InlineKeyboardButton("👁️ Preview Public Store", callback_data="user:home")
+    )
     return markup
 
 
@@ -169,7 +172,9 @@ def app_list_keyboard(apps, action_prefix="view_app"):
         button_text = f"{pinned_tag}{featured}{badge}{type_icon} {name} ({app.get('version', 'v1.0')})"
         markup.add(InlineKeyboardButton(button_text, callback_data=f"{action_prefix}:{app_id}"))
 
-    markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu:main"))
+    back_cb = "user:home" if str(action_prefix).startswith("user") else "menu:main"
+    back_label = "🔙 Back to Store Home" if str(action_prefix).startswith("user") else "🔙 Back to Main Menu"
+    markup.add(InlineKeyboardButton(back_label, callback_data=back_cb))
     return markup
 
 
@@ -489,3 +494,51 @@ def screenshots_step_keyboard(has_screenshots=False):
             InlineKeyboardButton("❌ Cancel", callback_data="menu:main"),
         )
     return markup
+
+
+def user_store_keyboard(store_url=None):
+    """Public store menu for regular users and visitors"""
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("📱 Browse Apps Catalog", callback_data="user:browse"),
+        InlineKeyboardButton("⭐ Featured & Top", callback_data="user:featured"),
+    )
+    store_row = []
+    if store_url and is_valid_telegram_button_url(store_url):
+        store_row.append(InlineKeyboardButton("🌐 Open Web Store", url=store_url))
+    else:
+        store_row.append(InlineKeyboardButton("🌐 Web Store Info", callback_data="user:web_info"))
+    store_row.append(InlineKeyboardButton("👤 Developer Profile", callback_data="user:dev_profile"))
+    markup.add(*store_row)
+
+    markup.add(
+        InlineKeyboardButton("💬 Contact Developer", callback_data="user:contact"),
+        InlineKeyboardButton("🔐 Admin Console", callback_data="user:admin_login"),
+    )
+    return markup
+
+
+def user_app_detail_keyboard(app, store_url=None):
+    """User-facing actions for viewing an app"""
+    markup = InlineKeyboardMarkup(row_width=1)
+    app_id = app.get("id", "")
+    dl_url = app.get("downloadUrl") or app.get("webUrl") or app.get("sourceUrl")
+
+    action_btns = []
+    if dl_url and is_valid_telegram_button_url(dl_url):
+        btn_text = app.get("buttonText") or ("📥 Download APK" if app.get("type") == "app" else "🌐 Open Project")
+        action_btns.append(InlineKeyboardButton(f"🚀 {btn_text}", url=dl_url))
+    
+    web_app_url = f"{store_url.rstrip('/')}/#/apps/{app_id}" if store_url else ""
+    if is_valid_telegram_button_url(web_app_url):
+        action_btns.append(InlineKeyboardButton("🌐 View on Web Store", url=web_app_url))
+
+    for btn in action_btns:
+        markup.add(btn)
+
+    markup.add(
+        InlineKeyboardButton("🔙 Back to Catalog", callback_data="user:browse"),
+        InlineKeyboardButton("🏠 Store Home", callback_data="user:home"),
+    )
+    return markup
+
