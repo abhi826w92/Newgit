@@ -1,0 +1,22 @@
+[Unit]
+Description=MyStore Telegram Admin Bot Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/mystore-bot
+ExecStart=/usr/bin/python3 /root/mystore-bot/main.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+# Auto recovery & resource limits
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
