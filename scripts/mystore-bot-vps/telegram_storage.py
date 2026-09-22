@@ -10,6 +10,8 @@ import asyncio
 import hashlib
 import hmac
 import base64
+import threading
+import requests
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +31,26 @@ try:
     HAS_TELETHON = True
 except ImportError:
     HAS_TELETHON = False
+
+
+# ==============================================================================
+# Persistent MTProto Background Loop Runner (Prevents Event Loop Closed Errors)
+# ==============================================================================
+_mtproto_loop = None
+_mtproto_thread = None
+_loop_lock = threading.Lock()
+
+def get_mtproto_loop():
+    global _mtproto_loop, _mtproto_thread
+    with _loop_lock:
+        if _mtproto_loop is None or not _mtproto_thread or not _mtproto_thread.is_alive():
+            def _loop_worker(l):
+                asyncio.set_event_loop(l)
+                l.run_forever()
+            _mtproto_loop = asyncio.new_event_loop()
+            _mtproto_thread = threading.Thread(target=_loop_worker, args=(_mtproto_loop,), daemon=True, name="MTProto-Worker")
+            _mtproto_thread.start()
+    return _mtproto_loop
 
 
 # ==============================================================================
@@ -58,25 +80,30 @@ def encrypt_session_string(plain_text: str, secret_key: str = ADMIN_SECURITY_TOK
         
     cipher = bytes(a ^ b for a, b in zip(plain_bytes, keystream[:len(plain_bytes)]))
     tag = hmac.new(k_auth, iv + cipher, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(iv + tag + cipher).decode("utf-8")
+    
+    # Combine: [IV (16 bytes)] + [Tag (32 bytes)] + [Ciphertext]
+    payload = iv + tag + cipher
+    return base64.urlsafe_b64encode(payload).decode("utf-8")
 
 
-def decrypt_session_string(encrypted_token: str, secret_key: str = ADMIN_SECURITY_TOKEN) -> str:
-    """Decrypt authenticated session ciphertext back to plain string"""
-    if not encrypted_token:
+def decrypt_session_string(token_str: str, secret_key: str = ADMIN_SECURITY_TOKEN) -> str:
+    """Decrypt authenticated session string"""
+    if not token_str:
         return ""
     try:
-        raw = base64.urlsafe_b64decode(encrypted_token.encode("utf-8"))
+        raw = base64.urlsafe_b64decode(token_str.encode("utf-8"))
         if len(raw) < 48:
             return ""
         iv = raw[:16]
         tag = raw[16:48]
         cipher = raw[48:]
+        
         k_enc, k_auth = _derive_keys(secret_key)
+        
         expected_tag = hmac.new(k_auth, iv + cipher, hashlib.sha256).digest()
         if not hmac.compare_digest(tag, expected_tag):
-            print("⚠️ [MTProto Session] Warning: Decryption integrity check failed.")
             return ""
+            
         keystream = bytearray()
         counter = 0
         while len(keystream) < len(cipher):
@@ -139,11 +166,12 @@ class TelegramChannelStorage:
                 print(f"🔒 [MTProto] Session encrypted & saved at: {self.enc_session_path}")
 
     def get_client(self):
-        """Initialize Telethon client with encrypted session"""
+        """Initialize Telethon client with encrypted session on persistent loop"""
         if not self.is_configured() or not HAS_TELETHON:
             return None
 
         if self.client is None:
+            loop = get_mtproto_loop()
             plain_session_str = self._load_decrypted_session_string()
             session = StringSession(plain_session_str)
 
@@ -153,7 +181,8 @@ class TelegramChannelStorage:
                 self.api_hash,
                 device_model="MyStore Pure MTProto Engine",
                 system_version="Linux Native",
-                app_version="3.0.0"
+                app_version="3.0.0",
+                loop=loop
             )
         return self.client
 
@@ -182,14 +211,16 @@ class TelegramChannelStorage:
                     except Exception:
                         pass
 
-                # 2. Recreate Telethon client with fresh session
+                # 2. Recreate Telethon client with fresh session on persistent loop
+                loop = get_mtproto_loop()
                 self.client = TelegramClient(
                     StringSession(""),
                     self.api_id,
                     self.api_hash,
                     device_model="MyStore Pure MTProto Engine",
                     system_version="Linux Native",
-                    app_version="3.0.0"
+                    app_version="3.0.0",
+                    loop=loop
                 )
                 await self.client.connect()
                 await self.client.start(bot_token=self.bot_token)
@@ -227,18 +258,19 @@ class TelegramChannelStorage:
             return False, f"MTProto download error: {str(e)}"
 
     def sync_download_media(self, chat_id, message_id, destination_path, progress_callback=None):
-        """Synchronous wrapper for pure MTProto download"""
+        """Synchronous wrapper for pure MTProto download using persistent loop"""
+        loop = get_mtproto_loop()
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(self.download_media_mtproto(chat_id, message_id, destination_path, progress_callback))
-            loop.close()
-            return result
+            future = asyncio.run_coroutine_threadsafe(
+                self.download_media_mtproto(chat_id, message_id, destination_path, progress_callback),
+                loop
+            )
+            return future.result(timeout=600)
         except Exception as e:
             return False, str(e)
 
     # --------------------------------------------------------------------------
-    # 100% PURE MTPROTO UPLOAD (Zero Bot API - Channel Cloud Archive)
+    # 100% PURE MTPROTO UPLOAD (Channel Cloud Archive with Bot API Fallback)
     # --------------------------------------------------------------------------
     async def upload_file_to_channel(self, file_path, caption=None, progress_callback=None):
         """Upload large file/APK directly to permanent storage channel via MTProto"""
@@ -274,6 +306,7 @@ class TelegramChannelStorage:
 
             clean_cid = str(self.channel_id).replace("-100", "").replace("-", "")
             channel_link = f"https://t.me/c/{clean_cid}/{msg.id}"
+            print(f"✅ [MTProto Storage] File '{file_name}' uploaded to channel msg {msg.id}")
 
             return True, {
                 "message_id": msg.id,
@@ -285,15 +318,60 @@ class TelegramChannelStorage:
             return False, f"MTProto channel upload error: {str(e)}"
 
     def sync_upload_to_channel(self, file_path, caption=None, progress_callback=None):
-        """Synchronous wrapper for pure MTProto upload to channel"""
+        """Synchronous wrapper for pure MTProto upload to channel with Bot API fallback"""
+        loop = get_mtproto_loop()
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(self.upload_file_to_channel(file_path, caption, progress_callback))
-            loop.close()
-            return result
+            future = asyncio.run_coroutine_threadsafe(
+                self.upload_file_to_channel(file_path, caption, progress_callback),
+                loop
+            )
+            ok, res = future.result(timeout=600)
+            if ok:
+                return True, res
+            print(f"⚠️ [MTProto Channel Upload] MTProto notice: {res}. Using Bot API fallback...")
         except Exception as e:
-            return False, str(e)
+            print(f"⚠️ [MTProto Channel Upload] MTProto exception: {e}. Using Bot API fallback...")
+
+        # 100% Reliable Fallback: Telegram Bot API direct multipart upload
+        return self._bot_api_fallback_upload(file_path, caption)
+
+    def _bot_api_fallback_upload(self, file_path, caption=None):
+        """Fallback to Telegram Bot API sendDocument to guarantee 100% channel delivery"""
+        if not os.path.exists(file_path):
+            return False, f"File not found: {file_path}"
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+            clean_filename = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            print(f"📦 [Bot API Channel Upload] Archiving '{clean_filename}' to channel {self.channel_id}...")
+            with open(file_path, "rb") as f:
+                res = requests.post(
+                    url,
+                    data={
+                        "chat_id": self.channel_id,
+                        "caption": caption or f"📦 <b>MyStore Storage Asset</b>\n<code>{clean_filename}</code>",
+                        "parse_mode": "HTML"
+                    },
+                    files={"document": (clean_filename, f)},
+                    timeout=180
+                )
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("ok"):
+                    msg_id = data["result"]["message_id"]
+                    clean_cid = str(self.channel_id).replace("-100", "").replace("-", "")
+                    channel_link = f"https://t.me/c/{clean_cid}/{msg_id}"
+                    print(f"✅ [Channel Storage] Fallback Bot API successfully archived msg {msg_id}!")
+                    return True, {
+                        "message_id": msg_id,
+                        "channel_link": channel_link,
+                        "file_name": clean_filename,
+                        "file_size": file_size
+                    }
+                return False, f"Telegram Bot API error: {data.get('description')}"
+            return False, f"HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            return False, f"Bot API fallback failed: {str(e)}"
 
 
 # Global Singleton Instance

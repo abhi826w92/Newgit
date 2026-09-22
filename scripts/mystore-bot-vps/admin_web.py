@@ -445,8 +445,11 @@ async def handle_upload_release_asset(request):
                     if tg_ok and isinstance(tg_res, dict):
                         telegram_channel_link = tg_res.get("channel_link", "")
                         telegram_message_id = tg_res.get("message_id")
+                        print(f"✅ [Admin Web] Archived to Telegram Storage Channel: {telegram_channel_link} (Msg ID: {telegram_message_id})")
+                    else:
+                        print(f"⚠️ [Admin Web Channel Upload] Channel archive notice: {tg_res}")
                 except Exception as tg_err:
-                    print(f"[Admin Web MTProto Upload] Notice: {tg_err}")
+                    print(f"[Admin Web MTProto Upload] Exception: {tg_err}")
 
             # 2b. GitHub Releases CDN Upload
             start_gh = time.time()
