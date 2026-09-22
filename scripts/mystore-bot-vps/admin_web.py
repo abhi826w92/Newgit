@@ -411,27 +411,8 @@ async def handle_upload_release_asset(request):
         "updated_at": time.time()
     }
 
-    def _process_github_upload():
+    def _process_binary_upload():
         import tempfile
-        # 1. Determine release target
-        if release_id:
-            res = requests.get(
-                f"{github_mgr.api_base}/repos/{github_mgr.owner}/{github_mgr.repo}/releases/{release_id}",
-                headers=github_mgr.headers,
-                timeout=12
-            )
-            if res.status_code == 200:
-                rel = res.json()
-            else:
-                ok, rel = github_mgr.get_or_create_release(tag or f"v{int(time.time())}", title, notes)
-                if not ok:
-                    return False, f"Target release error: {rel}"
-        else:
-            ok, rel = github_mgr.get_or_create_release(tag, title or tag, notes or f"Release {tag}")
-            if not ok:
-                return False, f"Failed to get/create release: {rel}"
-
-        # 2. Write temp file and upload asset with live progress callback
         clean_filename = os.path.basename(filename)
         temp_dir = tempfile.mkdtemp(prefix="mystore_bin_")
         temp_file = os.path.join(temp_dir, clean_filename)
@@ -439,9 +420,13 @@ async def handle_upload_release_asset(request):
             with open(temp_file, "wb") as f:
                 f.write(file_bytes)
 
-            # 2a. MTProto Pure Telegram Channel Archive (using API_ID & API_HASH)
             telegram_channel_link = ""
             telegram_message_id = None
+            tg_ok = False
+            tg_res = None
+
+            # 1. Primary Pure MTProto Upload via Telegram API_ID & API_HASH
+            # High speed, direct Telegram datacenter streaming, bypasses 20MB bot limits & preserves GitHub rate limits
             if storage_mgr.is_configured():
                 start_tg = time.time()
                 last_tg_t = start_tg
@@ -480,7 +465,7 @@ async def handle_upload_release_asset(request):
                             f"📄 <b>File:</b> <code>{clean_filename}</code>\n"
                             f"💾 <b>Size:</b> <code>{round(total_file_size / (1024*1024), 2)} MB</code>\n"
                             f"🏷️ <b>Tag:</b> <code>{tag}</code>\n"
-                            f"⚡ <b>Engine:</b> Web Panel (Pure MTProto API_ID: {storage_mgr.api_id})"
+                            f"⚡ <b>Engine:</b> Pure MTProto (API_ID: {storage_mgr.api_id})"
                         ),
                         progress_callback=_on_tg_progress
                     )
@@ -489,76 +474,102 @@ async def handle_upload_release_asset(request):
                         telegram_message_id = tg_res.get("message_id")
                         print(f"✅ [Admin Web] Archived to Telegram Storage Channel: {telegram_channel_link} (Msg ID: {telegram_message_id})")
                     else:
-                        print(f"⚠️ [Admin Web Channel Upload] Channel archive notice: {tg_res}")
+                        print(f"⚠️ [Admin Web Channel Upload] Notice: {tg_res}")
                 except Exception as tg_err:
                     print(f"[Admin Web MTProto Upload] Exception: {tg_err}")
 
-            # 2b. GitHub Releases CDN Upload
-            start_gh = time.time()
-            last_t = start_gh
-            last_b = 0
+            # 2. GitHub Releases Mirror (Non-blocking & Safe to preserve GitHub rate limits)
+            dl_url = telegram_channel_link
+            rel_obj = None
+            gh_asset_obj = None
 
-            def _on_gh_progress(sent_bytes, total_bytes):
-                nonlocal last_t, last_b
-                now = time.time()
-                dt = now - last_t
-                speed = 0
-                if dt >= 0.15 or sent_bytes >= total_bytes:
-                    speed = (sent_bytes - last_b) / max(dt, 0.001)
-                    last_t = now
-                    last_b = sent_bytes
+            if github_mgr.token and github_mgr.owner and github_mgr.repo:
+                try:
+                    if release_id:
+                        res = requests.get(
+                            f"{github_mgr.api_base}/repos/{github_mgr.owner}/{github_mgr.repo}/releases/{release_id}",
+                            headers=github_mgr.headers,
+                            timeout=8
+                        )
+                        if res.status_code == 200:
+                            rel_obj = res.json()
 
-                pct = min(100, int((sent_bytes / max(total_bytes, 1)) * 100))
-                eta = int((total_bytes - sent_bytes) / max(speed, 1)) if speed > 0 else 0
+                    if not rel_obj and tag:
+                        ok_rel, rel_obj = github_mgr.get_or_create_release(tag, title or tag, notes or f"Release {tag}")
 
+                    if rel_obj and isinstance(rel_obj, dict):
+                        start_gh = time.time()
+                        last_t = start_gh
+                        last_b = 0
+
+                        def _on_gh_progress(sent_bytes, total_bytes):
+                            nonlocal last_t, last_b
+                            now = time.time()
+                            dt = now - last_t
+                            speed = 0
+                            if dt >= 0.15 or sent_bytes >= total_bytes:
+                                speed = (sent_bytes - last_b) / max(dt, 0.001)
+                                last_t = now
+                                last_b = sent_bytes
+
+                            pct = min(100, int((sent_bytes / max(total_bytes, 1)) * 100))
+                            eta = int((total_bytes - sent_bytes) / max(speed, 1)) if speed > 0 else 0
+
+                            UPLOAD_PROGRESS[upload_id] = {
+                                "phase": "github_uploading",
+                                "percent": pct,
+                                "loaded": sent_bytes,
+                                "total": total_bytes,
+                                "speed": round(speed, 1),
+                                "eta": eta,
+                                "status": f"Syncing GitHub Release CDN (Optional Mirror): {pct}%",
+                                "updated_at": time.time()
+                            }
+
+                        ok_gh, asset_res = github_mgr.upload_asset(rel_obj, temp_file, clean_filename, progress_callback=_on_gh_progress)
+                        if ok_gh:
+                            gh_dl = asset_res.get("browser_download_url") if isinstance(asset_res, dict) else str(asset_res)
+                            if gh_dl:
+                                dl_url = gh_dl
+                                gh_asset_obj = {"browser_download_url": gh_dl, "name": clean_filename}
+                                print(f"✅ [Admin Web] Mirrored to GitHub Release: {gh_dl}")
+                        else:
+                            print(f"⚠️ [Admin Web] GitHub mirror skipped: {asset_res}. Preserving GitHub limits; Telegram Storage link active.")
+                except Exception as gh_ex:
+                    print(f"⚠️ [Admin Web] GitHub mirror notice: {gh_ex}. Preserving GitHub limits; Telegram Storage link active.")
+
+            # Verify at least one storage target succeeded
+            if not dl_url and not tg_ok:
+                err_text = tg_res or "Failed to upload to Telegram Storage Channel or GitHub Releases"
                 UPLOAD_PROGRESS[upload_id] = {
-                    "phase": "github_uploading",
-                    "percent": pct,
-                    "loaded": sent_bytes,
-                    "total": total_bytes,
-                    "speed": round(speed, 1),
-                    "eta": eta,
-                    "status": f"Publishing to GitHub Releases CDN: {pct}%",
+                    "phase": "error",
+                    "percent": 0,
+                    "status": f"Upload failed: {err_text}",
                     "updated_at": time.time()
                 }
+                return False, f"Upload failed: {err_text}"
 
-            ok, asset_res = github_mgr.upload_asset(rel, temp_file, clean_filename, progress_callback=_on_gh_progress)
-            if ok:
-                UPLOAD_PROGRESS[upload_id] = {
-                    "phase": "completed",
-                    "percent": 100,
-                    "loaded": total_file_size,
-                    "total": total_file_size,
-                    "speed": 0,
-                    "eta": 0,
-                    "status": "Binary asset published to GitHub Release & Telegram Storage!",
-                    "updated_at": time.time()
-                }
-
-                if isinstance(asset_res, dict):
-                    dl_url = asset_res.get("browser_download_url") or ""
-                    asset_obj = asset_res
-                else:
-                    dl_url = str(asset_res)
-                    asset_obj = {"browser_download_url": dl_url, "name": clean_filename}
-
-                return True, {
-                    "release": rel,
-                    "asset": asset_obj,
-                    "download_url": dl_url,
-                    "telegram_channel_link": telegram_channel_link,
-                    "telegram_message_id": telegram_message_id,
-                    "filename": clean_filename,
-                    "size_mb": round(len(file_bytes) / (1024 * 1024), 2)
-                }
-
+            # Completed successfully!
             UPLOAD_PROGRESS[upload_id] = {
-                "phase": "error",
-                "percent": 0,
-                "status": f"GitHub upload error: {asset_res}",
+                "phase": "completed",
+                "percent": 100,
+                "loaded": total_file_size,
+                "total": total_file_size,
+                "speed": 0,
+                "eta": 0,
+                "status": "Binary asset successfully archived to Cloud Storage (MTProto Engine)!",
                 "updated_at": time.time()
             }
-            return False, f"GitHub asset upload failed: {asset_res}"
+
+            return True, {
+                "release": rel_obj or {"tag_name": tag, "name": title or tag},
+                "asset": gh_asset_obj or {"browser_download_url": dl_url, "name": clean_filename},
+                "download_url": dl_url,
+                "telegram_channel_link": telegram_channel_link,
+                "telegram_message_id": telegram_message_id,
+                "filename": clean_filename,
+                "size_mb": round(total_file_size / (1024 * 1024), 2)
+            }
         finally:
             try:
                 if os.path.exists(temp_file):
@@ -568,7 +579,7 @@ async def handle_upload_release_asset(request):
             except Exception:
                 pass
 
-    ok, result = await asyncio.to_thread(_process_github_upload)
+    ok, result = await asyncio.to_thread(_process_binary_upload)
     if ok:
         return web.json_response({"success": True, **result})
     return web.json_response({"error": str(result)}, status=500)
