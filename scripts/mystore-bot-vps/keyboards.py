@@ -34,8 +34,19 @@ def main_menu_keyboard():
         InlineKeyboardButton("🗑️ Delete Project", callback_data="menu:delete_app_list"),
     )
     markup.add(
+        InlineKeyboardButton("👑 Admin Web Panel", callback_data="menu:admin_web_link"),
         InlineKeyboardButton("👁️ Preview Public Store", callback_data="user:home")
     )
+    return markup
+
+
+def admin_web_panel_keyboard(tunnel_url=None):
+    """Actions for Admin Web Panel link"""
+    markup = InlineKeyboardMarkup(row_width=1)
+    if tunnel_url and is_valid_telegram_button_url(tunnel_url):
+        markup.add(InlineKeyboardButton("🚀 Open Web Panel (Direct)", url=tunnel_url))
+    markup.add(InlineKeyboardButton("🔄 Refresh Link", callback_data="menu:admin_web_link"))
+    markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu:main"))
     return markup
 
 

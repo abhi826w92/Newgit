@@ -6,6 +6,7 @@ Uses Persistent HTTP Keep-Alive Connection Pooling and In-Memory Caching for Sub
 import json
 import os
 import time
+import copy
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -13,6 +14,66 @@ from dotenv import load_dotenv
 from cpp_engine import sort_apps_by_priority, fast_fuzzy_score
 
 load_dotenv()
+
+def sanitize_app_for_firebase(app):
+    """
+    Sanitizes app object to strictly conform to Firebase Realtime Database Security Rules.
+    Rules enforce:
+    - type must be one of: 'app', 'web', 'opensource', 'source'
+    - $other fields must satisfy: newData.val().length <= 2000 (i.e. must be strings!)
+    - featured must be boolean
+    """
+    clean = copy.deepcopy(app)
+    
+    # 1. Type validation
+    valid_types = {'app', 'web', 'opensource', 'source'}
+    if clean.get('type') not in valid_types:
+        clean['type'] = 'app'
+        
+    # 2. Pinned & PinnedOrder (convert to strings because Firebase $other requires .length)
+    if 'pinned' in clean:
+        clean['pinned'] = 'true' if clean['pinned'] else 'false'
+    if 'pinnedOrder' in clean:
+        clean['pinnedOrder'] = str(clean['pinnedOrder'])
+        
+    # 3. Handle any non-string primitives under $other
+    known_keys = {
+        'id', 'name', 'type', 'tagline', 'version', 'category',
+        'downloadUrl', 'webUrl', 'sourceUrl', 'icon', 'size',
+        'featured', 'rating', 'downloads', 'description',
+        'updatedDate', 'screenshots', 'changelog', 'versionHistory'
+    }
+    for k, v in list(clean.items()):
+        if k not in known_keys:
+            if isinstance(v, bool):
+                clean[k] = 'true' if v else 'false'
+            elif isinstance(v, (int, float)):
+                clean[k] = str(v)
+            elif v is None:
+                del clean[k]
+                
+    return clean
+
+def normalize_app_from_firebase(app):
+    """
+    Normalizes app object read from Firebase back to standard Python types.
+    """
+    clean = dict(app)
+    if 'pinned' in clean:
+        clean['pinned'] = (clean['pinned'] in (True, 'true', 'True', '1', 1))
+    else:
+        clean['pinned'] = False
+
+    if 'pinnedOrder' in clean:
+        try:
+            clean['pinnedOrder'] = int(clean['pinnedOrder'])
+        except (ValueError, TypeError):
+            clean.pop('pinnedOrder', None)
+
+    if 'featured' in clean:
+        clean['featured'] = bool(clean['featured'])
+        
+    return clean
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
@@ -92,9 +153,9 @@ class FirebaseManager:
             return self._cache
 
         try:
-            r_apps = self.session.get(self._get_url("apps"), timeout=4)
-            r_cats = self.session.get(self._get_url("categories"), timeout=4)
-            r_dev = self.session.get(self._get_url("developer"), timeout=4)
+            r_apps = self.session.get(self._get_url("apps"), timeout=15)
+            r_cats = self.session.get(self._get_url("categories"), timeout=15)
+            r_dev = self.session.get(self._get_url("developer"), timeout=15)
 
             local_fallback = self.read_local_json()
             apps_data = r_apps.json() if r_apps.status_code == 200 and r_apps.json() is not None else local_fallback.get("apps", [])
@@ -104,7 +165,7 @@ class FirebaseManager:
             # Normalize apps array/dict
             if isinstance(apps_data, dict):
                 apps_data = [dict(id=k, **v) if isinstance(v, dict) else v for k, v in apps_data.items()]
-            apps_list = [a for a in apps_data if a]
+            apps_list = [normalize_app_from_firebase(a) for a in apps_data if a]
 
             if isinstance(cats_data, dict):
                 cats_data = list(cats_data.values())
@@ -122,30 +183,56 @@ class FirebaseManager:
             print(f"[Firebase] Fetch error, using local fallback: {e}")
         
         fallback = self.read_local_json()
+        fallback_apps = [normalize_app_from_firebase(a) for a in fallback.get("apps", [])]
+        fallback["apps"] = fallback_apps
         self._cache = fallback
         self._cache_time = now
         return fallback
 
-    def sync_to_cloud(self, full_data):
+    def sync_to_cloud(self, full_data, sync_extra=True):
         """Write store data to Firebase Realtime Database child nodes & local apps.json"""
+        self.last_sync_error = None
         # 1. Update in-memory cache and local file
         self._cache = full_data
         self._cache_time = time.time()
         self.write_local_json(full_data)
 
-        # 2. Update Firebase Realtime Database
+        # 2. Update Firebase Realtime Database with strict schema sanitization
         try:
             apps = full_data.get("apps", [])
             categories = full_data.get("categories", [])
             developer = full_data.get("developer", {})
 
-            r_apps = self.session.put(self._get_url("apps"), json=apps, timeout=6)
-            r_cats = self.session.put(self._get_url("categories"), json=categories, timeout=6)
-            r_dev = self.session.put(self._get_url("developer"), json=developer, timeout=6)
+            # Strict rule compliance: sanitize fields so $other satisfies .length
+            apps_payload = [sanitize_app_for_firebase(a) for a in apps]
 
-            return (r_apps.status_code == 200 and r_cats.status_code == 200 and r_dev.status_code == 200)
+            # Primary: Sync apps node with 25s timeout
+            r_apps = self.session.put(self._get_url("apps"), json=apps_payload, timeout=25)
+            apps_ok = (r_apps.status_code in (200, 201))
+
+            if not apps_ok:
+                err_text = f"HTTP {r_apps.status_code}: {r_apps.text[:100]}"
+                print(f"[Firebase] Cloud sync apps error: {err_text}")
+                self.last_sync_error = err_text
+                return False
+
+            # Secondary: Sync categories and developer if present (non-fatal for app update success)
+            if sync_extra:
+                if categories:
+                    try:
+                        self.session.put(self._get_url("categories"), json=categories, timeout=15)
+                    except Exception as cat_e:
+                        print(f"[Firebase] Non-fatal categories sync notice: {cat_e}")
+                if developer:
+                    try:
+                        self.session.put(self._get_url("developer"), json=developer, timeout=15)
+                    except Exception as dev_e:
+                        print(f"[Firebase] Non-fatal developer sync notice: {dev_e}")
+
+            return True
         except Exception as e:
             print(f"[Firebase] Cloud sync error: {e}")
+            self.last_sync_error = str(e)
             return False
 
     def get_all_apps(self):

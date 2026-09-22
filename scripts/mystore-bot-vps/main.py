@@ -72,7 +72,10 @@ from keyboards import (
     is_valid_telegram_button_url,
     user_store_keyboard,
     user_app_detail_keyboard,
+    admin_web_panel_keyboard,
 )
+
+from admin_web import start_admin_web_in_background, get_tunnel_url, ADMIN_WEB_PASSWORD
 
 # Configuration & Security Whitelist
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8630369883:AAGN6KGgl0TGYaHRkdJt_epiiWy60icpZD0")
@@ -278,6 +281,34 @@ def handle_auth_command(message):
     else:
         log_activity("Admin auth failed (wrong token)", user_id=user_id)
         bot.reply_to(message, "❌ <b>Invalid Security Token.</b> Access denied.")
+
+
+@bot.message_handler(commands=["web", "admin_web", "panel"])
+def handle_web_panel_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.reply_to(message, "🔒 <b>Access Denied:</b> Admin authorization required.")
+        return
+
+    tunnel_url = get_tunnel_url()
+    if tunnel_url:
+        text = (
+            "👑 <b>MyStore Dedicated Admin Web Command Center</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 <b>Live Cloudflare Tunnel Link:</b>\n"
+            f"<code>{tunnel_url}</code>\n\n"
+            f"🔑 <b>Admin Master Password:</b> <code>{ADMIN_WEB_PASSWORD}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Open in your browser to manage apps, categories, releases, and live analytics!</i>"
+        )
+        bot.send_message(message.chat.id, text, reply_markup=admin_web_panel_keyboard(tunnel_url))
+    else:
+        bot.send_message(
+            message.chat.id,
+            "⏳ <b>Cloudflare Tunnel is connecting...</b>\nPlease wait a few seconds and tap below to refresh:",
+            reply_markup=admin_web_panel_keyboard(None)
+        )
+
 
 
 # --------------------------------------------------------------------------
@@ -1768,6 +1799,30 @@ def _handle_callback_router_impl(call):
         )
         bot.edit_message_text(health_text, call.message.chat.id, call.message.message_id, reply_markup=back_to_main_keyboard())
         safe_answer_callback(call)
+        return
+
+    # Admin Web Panel Cloudflare Link
+    elif data == "menu:admin_web_link":
+        safe_answer_callback(call, "Fetching Web Link...")
+        tunnel_url = get_tunnel_url()
+        if tunnel_url:
+            text = (
+                "👑 <b>MyStore Dedicated Admin Web Command Center</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔗 <b>Live Cloudflare Tunnel Link:</b>\n"
+                f"<code>{tunnel_url}</code>\n\n"
+                f"🔑 <b>Admin Master Password:</b> <code>{ADMIN_WEB_PASSWORD}</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>Open in your browser to manage apps, categories, releases, and live analytics!</i>"
+            )
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=admin_web_panel_keyboard(tunnel_url))
+        else:
+            bot.edit_message_text(
+                "⏳ <b>Cloudflare Tunnel is connecting...</b>\nPlease wait 3-5 seconds and tap Refresh Link:",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=admin_web_panel_keyboard(None)
+            )
         return
 
     # 8. Set Featured App Menu
@@ -3677,6 +3732,16 @@ if __name__ == "__main__":
     print(f"🐙 GitHub Target: {github_mgr.owner}/{github_mgr.repo}")
     print(f"🔥 Firebase Database: {firebase_mgr.db_url}")
     print(f"🚀 Bot is polling for commands...")
+
+    # Automatically launch Dedicated Admin Web Command Center & Cloudflare Tunnel
+    try:
+        def _on_tunnel_connected(t_url):
+            print(f"🌐 [Tunnel Online] Admin Web Panel: {t_url} (Password: {ADMIN_WEB_PASSWORD})", flush=True)
+
+        start_admin_web_in_background(port=5000, on_tunnel_ready=_on_tunnel_connected)
+        print("👑 Admin Web Panel & Cloudflare Tunnel starting in background...")
+    except Exception as awe:
+        print(f"⚠️ Notice starting admin web panel: {awe}")
 
     try:
         # Reset any conflicting webhooks and drop stale updates to prevent 409 Conflict & 400 Query Timeout

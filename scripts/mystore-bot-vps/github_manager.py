@@ -55,6 +55,7 @@ class GitHubManager:
         self.owner = owner or GITHUB_OWNER
         self.repo = repo or GITHUB_REPO
         self.api_base = "https://api.github.com"
+        self.session = requests.Session()
 
     @property
     def headers(self):
@@ -276,6 +277,17 @@ class GitHubManager:
                 return False, f"Failed to delete: {res.text}"
         except Exception as e:
             return False, f"Delete error: {str(e)}"
+
+    def delete_asset(self, asset_id):
+        """Delete an asset from a release by its asset_id"""
+        url = f"{self.api_base}/repos/{self.owner}/{self.repo}/releases/assets/{asset_id}"
+        try:
+            res = requests.delete(url, headers=self.headers, timeout=10)
+            if res.status_code == 204:
+                return True, "Asset successfully deleted from release."
+            return False, f"Failed to delete asset: {res.status_code} {res.text}"
+        except Exception as e:
+            return False, f"Delete asset error: {str(e)}"
 
 
 # Global Singleton Instance

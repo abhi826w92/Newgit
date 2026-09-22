@@ -39,6 +39,7 @@ g++ -O3 -shared -fPIC cpp_core/engine.cpp -o /root/.mystore_native/libengine.so 
 # 5. Install Systemd Service (Starts on Boot + Auto-Restart on Crash)
 echo "⚙️ Configuring Systemd Background Service..."
 chmod +x "$TARGET_DIR"/start.sh
+chmod +x "$TARGET_DIR"/bin/cloudflared 2>/dev/null || true
 sed -i "s|/root/mystore-bot|$TARGET_DIR|g" mystore-bot.service
 cp mystore-bot.service /etc/systemd/system/mystore-bot.service
 

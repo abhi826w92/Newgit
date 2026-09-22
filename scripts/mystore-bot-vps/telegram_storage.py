@@ -158,22 +158,46 @@ class TelegramChannelStorage:
         return self.client
 
     async def ensure_authorized(self):
-        """Ensure MTProto client is connected and authenticated"""
+        """Ensure MTProto client is connected and authenticated with auto-renewal fallback"""
         client = self.get_client()
         if not client:
             return False, "Telethon client not configured."
 
-        if not client.is_connected():
-            await client.connect()
+        try:
+            if not client.is_connected():
+                await client.connect()
 
-        if not await client.is_user_authorized():
-            try:
+            if not await client.is_user_authorized():
                 await client.start(bot_token=self.bot_token)
                 self.save_encrypted_session()
-            except Exception as e:
-                return False, f"MTProto Auth error: {str(e)}"
 
-        return True, client
+            return True, client
+        except Exception as initial_err:
+            print(f"⚠️ [MTProto] Session expired or authorization notice: {initial_err}. Auto-healing session...")
+            try:
+                # 1. Clear stale session on disk
+                if os.path.exists(self.enc_session_path):
+                    try:
+                        os.remove(self.enc_session_path)
+                    except Exception:
+                        pass
+
+                # 2. Recreate Telethon client with fresh session
+                self.client = TelegramClient(
+                    StringSession(""),
+                    self.api_id,
+                    self.api_hash,
+                    device_model="MyStore Pure MTProto Engine",
+                    system_version="Linux Native",
+                    app_version="3.0.0"
+                )
+                await self.client.connect()
+                await self.client.start(bot_token=self.bot_token)
+                self.save_encrypted_session()
+                print("✅ [MTProto] Session successfully auto-renewed & saved!")
+                return True, self.client
+            except Exception as renew_err:
+                return False, f"MTProto Auto-Recovery failed: {str(renew_err)}"
 
     # --------------------------------------------------------------------------
     # 100% PURE MTPROTO DOWNLOAD (Zero Bot API - Supports up to 2GB-4GB)
@@ -260,12 +284,12 @@ class TelegramChannelStorage:
         except Exception as e:
             return False, f"MTProto channel upload error: {str(e)}"
 
-    def sync_upload_to_channel(self, file_path, caption=None):
+    def sync_upload_to_channel(self, file_path, caption=None, progress_callback=None):
         """Synchronous wrapper for pure MTProto upload to channel"""
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(self.upload_file_to_channel(file_path, caption))
+            result = loop.run_until_complete(self.upload_file_to_channel(file_path, caption, progress_callback))
             loop.close()
             return result
         except Exception as e:
