@@ -383,18 +383,25 @@ def github_releases_list_keyboard(releases):
     return markup
 
 
-def github_release_detail_keyboard(release_id, tag_name, download_url=None, html_url=None):
-    """Actions for a single GitHub release"""
-    markup = InlineKeyboardMarkup(row_width=2)
+def github_release_detail_keyboard(release_id, tag_name, download_url=None, html_url=None, assets=None):
+    """Actions for a single GitHub release with individual asset download buttons"""
+    markup = InlineKeyboardMarkup(row_width=1)
     
-    url_row = []
-    if is_valid_telegram_button_url(download_url):
-        url_row.append(InlineKeyboardButton("📥 Direct Download", url=download_url))
-    if is_valid_telegram_button_url(html_url):
-        url_row.append(InlineKeyboardButton("🐙 GitHub Page", url=html_url))
-    if url_row:
-        markup.add(*url_row)
+    # 1. Download buttons for each attached asset
+    if assets and isinstance(assets, list):
+        for a in assets:
+            a_url = a.get("browser_download_url")
+            a_name = a.get("name", "Asset")
+            if a_url and is_valid_telegram_button_url(a_url):
+                markup.add(InlineKeyboardButton(f"📥 Download {a_name[:28]}", url=a_url))
+    elif download_url and is_valid_telegram_button_url(download_url):
+        markup.add(InlineKeyboardButton("📥 Direct Download", url=download_url))
+
+    # 2. View on GitHub button
+    if html_url and is_valid_telegram_button_url(html_url):
+        markup.add(InlineKeyboardButton("🐙 View Release on GitHub", url=html_url))
         
+    # 3. Actions row: Delete & Back
     markup.add(
         InlineKeyboardButton("🗑️ Delete This Release", callback_data=f"gh_del_confirm:{release_id}:{tag_name}"),
         InlineKeyboardButton("🔙 Back to Releases", callback_data="menu:github_releases")

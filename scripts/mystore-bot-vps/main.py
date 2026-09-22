@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import re
+import html
 import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1241,30 +1242,73 @@ def _handle_callback_router_impl(call):
         tag = rel.get("tag_name", "")
         name = rel.get("name") or tag
         body = rel.get("body") or "No changelog provided."
-        pub_at = (rel.get("published_at") or "")[:10]
-        html_url = rel.get("html_url")
+        pub_at = (rel.get("published_at") or "").replace("T", " ").replace("Z", " UTC")
+        html_url = rel.get("html_url") or ""
+        author = rel.get("author", {}).get("login") if isinstance(rel.get("author"), dict) else (rel.get("author") or github_mgr.owner)
+        zipball_url = rel.get("zipball_url") or ""
         
         assets = rel.get("assets", [])
-        dl_url = assets[0].get("browser_download_url") if assets else None
+        total_downloads = sum(a.get("download_count", 0) for a in assets)
+        total_size_mb = round(sum(a.get("size", 0) for a in assets) / (1024 * 1024), 2)
         
-        assets_info = []
-        for a in assets:
-            size_mb = round(a.get("size", 0) / (1024 * 1024), 2)
-            dls = a.get("download_count", 0)
-            assets_info.append(f"• <b>{a.get('name')}:</b> <code>{size_mb} MB</code> | 📥 <code>{dls} downloads</code>")
+        # Build individual asset sections with monospace direct download link
+        assets_sections = []
+        for i, a in enumerate(assets, 1):
+            a_name = a.get("name", f"asset_{i}")
+            a_size_mb = round(a.get("size", 0) / (1024 * 1024), 2)
+            a_dls = a.get("download_count", 0)
+            a_url = a.get("browser_download_url") or ""
+            a_type = a.get("content_type") or "package"
+            a_digest = a.get("digest") or ""
+            
+            section = (
+                f"📦 <b>File #{i}:</b> <code>{html.escape(a_name)}</code>\n"
+                f"💾 <b>Size:</b> <code>{a_size_mb} MB</code> | 📥 <b>Downloads:</b> <code>{a_dls}</code>\n"
+                f"🏷️ <b>Type:</b> <code>{html.escape(a_type)}</code>\n"
+            )
+            if a_digest:
+                section += f"🛡️ <b>Digest:</b> <code>{html.escape(a_digest)}</code>\n"
+            if a_url:
+                section += (
+                    f"🔗 <b>Direct Download Link:</b>\n"
+                    f"<code>{html.escape(a_url)}</code>\n"
+                )
+            assets_sections.append(section)
 
-        assets_text = "\n".join(assets_info) if assets_info else "<i>No binary assets attached.</i>"
+        if assets_sections:
+            assets_text = "\n".join(assets_sections)
+        else:
+            assets_text = (
+                "<i>No binary files attached to this release.</i>\n\n"
+                f"📦 <b>Source Code (ZIP):</b>\n<code>{html.escape(zipball_url)}</code>\n"
+            )
+
+        # Truncate and escape body to prevent Telegram parse errors
+        clean_body = body.strip()
+        if len(clean_body) > 700:
+            clean_body = clean_body[:697] + "..."
+        safe_body = html.escape(clean_body)
 
         text = (
-            f"📦 <b>GitHub Release: {tag}</b>\n"
+            f"🐙 <b>GitHub Release Overview</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📝 <b>Title:</b> {name}\n"
-            f"📅 <b>Published:</b> <code>{pub_at}</code>\n"
-            f"🏷️ <b>Tag:</b> <code>{tag}</code>\n\n"
-            f"<b>Assets:</b>\n{assets_text}\n\n"
-            f"<b>Changelog:</b>\n<i>{body[:300]}</i>"
+            f"📦 <b>Release:</b> {html.escape(name)}\n"
+            f"🏷️ <b>Tag Version:</b> <code>{html.escape(tag)}</code>\n"
+            f"🆔 <b>Release ID:</b> <code>{html.escape(str(rel_id))}</code>\n"
+            f"📅 <b>Published:</b> <code>{html.escape(pub_at)}</code>\n"
+            f"👤 <b>Author:</b> <code>@{html.escape(author)}</code>\n"
+            f"📊 <b>Total Downloads:</b> <code>{total_downloads}</code> | 💾 <b>Total Size:</b> <code>{total_size_mb} MB</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📁 <b>Attached Assets ({len(assets)}):</b>\n\n"
+            f"{assets_text}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 <b>GitHub Web URL:</b>\n"
+            f"<code>{html.escape(html_url)}</code>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 <b>Changelog & Release Notes:</b>\n"
+            f"<i>{safe_body}</i>"
         )
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=github_release_detail_keyboard(rel_id, tag, dl_url, html_url))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=github_release_detail_keyboard(rel_id, tag, html_url=html_url, assets=assets))
         return
 
     elif data.startswith("gh_del_confirm:"):
