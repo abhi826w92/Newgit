@@ -1,0 +1,850 @@
+# 📖 Sabhi Features — Detail me (UI/UX + User Workflow)
+
+> Har feature me: **Kya hai → UI kaisa dikhega → User workflow → Code kahan lagega**
+
+---
+
+## ⚡ PART A: QUICK WINS (1–2 din wale)
+
+---
+
+### 1. 📺 Picture-in-Picture (PiP) Mode
+
+**Kya hai:** Video chalte waqt user home button dabaye → video chhota floating window me chalta rahe, app minimize hone ke bawajood.
+
+**UI/UX:**
+```
+┌──────────────────────┐      ┌──────────────────────┐
+│  ← WatchHub    [PiP] │      │                      │
+│ ┌──────────────────┐ │      │   (baki screen        │
+│ │                  │ │  →   │    normal chalti hai) │
+│ │   VIDEO PLAYING  │ │      │      ┌────────┐       │
+│ │                  │ │      │      │ ▶ video│       │
+│ └──────────────────┘ │      │      │ (chhota│       │
+│  ⏸  ⏭   ⬇️    🔍    │      │      │  popup)│       │
+└──────────────────────┘      │      └────────┘       │
+                              └──────────────────────┘
+```
+- WebActivity top-right me ek **PiP icon button** (▣ shape)
+- Tap → video corner me chhota ho jata hai (200dp × 120dp approx)
+- Popup pe tap → wapas full screen app me
+- Popup me **X (close)** bhi dikhe
+
+**User Workflow:**
+1. User koi video site kholta hai (WebActivity)
+2. Video chal raha hai → top bar me **PiP icon** tap
+3. App minimize → video **floating window** me chalta rahe
+4. User koi aur kaam kare (WhatsApp etc.) — video dikhta rahe
+5. Popup pe tap → app wapas open, video fullscreen
+6. Ya **X** dabaye → PiP band, app normal
+
+**Code:**
+- `AndroidManifest.xml` → WebActivity pe `android:supportsPictureInPictureMode="true"` + `configChanges` me `|screenLayout|smallestScreenSize` add
+- `WebActivity.kt` → button pe `enterPictureInPictureMode(PiPParams)` (API 26+), `onPictureInPictureModeChanged()` me controls hide/show
+- **minSdk 21 hai** → API 26 se kam pe button hide (`Build.VERSION.SDK_INT` check)
+
+---
+
+### 2. 🎵 Background Audio (Media Playback)
+
+**Kya hai:** App minimize ya screen off ho to bhi music/podcast sites ka audio chalta rahe + notification me play/pause control mile.
+
+**UI/UX:**
+```
+Notification shade:
+┌────────────────────────────────────┐
+│ 🎵 Now Playing — SiteName          │
+│ Song Title / Page Title            │
+│   ⏮    ▶/⏸    ⏭        ❌        │
+└────────────────────────────────────┘
+```
+
+**User Workflow:**
+1. User music site kholta hai (JioSaavn, YouTube web etc.)
+2. Play karta hai → audio chalta hai
+3. **Home button** / screen off → notification aata hai **"Now Playing"** wala
+4. Notification se **pause/resume/next** control kare — app kholne ki zaroorat nahi
+5. WebActivity wapas khole toh page wahi chal raha
+
+**Code:**
+- `WebActivity.kt` → `settings.mediaPlaybackRequiresUserGesture = false`
+- **MediaSession framework** use karo (`MediaSession` + `MediaSessionManager`) — WebView audio ko session se link
+- `MultiStreamApp.kt` me session create, notification builder me controls
+- Manifest: `FOREGROUND_SERVICE_MEDIA_PLAYBACK` permission (abhi `dataSync` hai)
+
+---
+
+### 3. 🔍 In-App Site Search
+
+**Kya hai:** Home screen (MainActivity) ke site list me instant filter — type karte hi sites kam hoti jayengi.
+
+**UI/UX:**
+```
+┌────────────────────────────────┐
+│  🔍 Search sites…              │  ← top search bar
+├────────────────────────────────┤
+│  ▸ [net] netmirror  ⭐         │  ← typing "net"
+│  ▸ [xxx] netflix clone         │
+├────────────────────────────────┤
+│  (baki sites gayab)            │
+└────────────────────────────────┘
+```
+- Search bar **sticky top** pe, icon se expand ya hamesha visible
+- Type karte hi **real-time filter** (150ms debounce)
+- Match **title + URL + category** dono pe
+- Result count: `"12 sites found"` chhota text
+- X icon → clear, keyboard auto-dismiss
+
+**User Workflow:**
+1. App khulta hai → top pe search bar
+2. "hot" type karta hai → sirf matching sites
+3. Card tap → WebActivity khulta hai
+4. X dabaye → pura list wapas
+
+**Code:**
+- `activity_main.xml` me `EditText` + `SiteAdapter.kt` me `filterList(query)`
+- `Site.kt` / `SiteData.kt` se data filter — no new dependency
+
+---
+
+### 4. ⬇️ Download Speed / ETA Display
+
+**Kya hai:** Download chalte waqt live speed (MB/s) aur "X minute bache hain" dikhe.
+
+**UI/UX (Downloads screen me):**
+```
+┌──────────────────────────────────────┐
+│ movie.m3u8                    67%   │
+│ ████████████████░░░░░               │
+│ 12.4 MB/s · 45 MB of 68 MB          │
+│ ⏱ 3 min left        [⏸]  [❌]      │
+└──────────────────────────────────────┘
+```
+- **Speed** — last 2 second ka rolling average (taaki fluctuate na kare)
+- **ETA** — `baki bytes ÷ speed` → "2 min left" / "Calculating…" (pehle 3 sec)
+- Progress bar ka neeche chhota line: `12.4 MB/s · ETA 3:20`
+
+**User Workflow:**
+1. Download start → progress bar + % 
+2. 3 sec baad → speed + ETA dikhne lagta hai
+3. Network slow ho → speed kam dikhe, ETA badhe (user ko pata chalta hai)
+4. Complete → "Done · 68 MB in 1:12"
+
+**Code:**
+- `HlsDownloader.kt` me already `downloaded/totalSize` count ho raha — bas **timestamps ka ring buffer** add karo (har 500ms sample) + `DownloadService` se UI ko throttle update (1/sec)
+- `item_download_active.xml` me 2 TextView add
+
+---
+
+### 5. 📊 Back History Badge
+
+**Kya hai:** WebView me multiple page peeche ho to back button pe count badge dikhe — user ko pata chale kitne pageStack me hain.
+
+**UI/UX:**
+```
+Top bar:   [← 3]  netmirror.com          [⋮]
+                ↑
+          badge: 3 pages back
+```
+- Back arrow pe **red circular badge** with number
+- Badge 0 ho toh sirf arrow (badge hidden)
+- Click karne pe count -1 hota jaye (live update via `doUpdateVisitedHistory`)
+
+**User Workflow:**
+1. User site A → article B → video C gaya
+2. Back button pe **"2"** badge dikhta hai
+3. Back dabata hai → badge "1" → "0" → ab peeche homepage (MainActivity) jayega
+
+**Code:**
+- `WebActivity.kt` → `WebViewClient.doUpdateVisitedHistory()` me `canGoBack()` count approximation (ya `webView.copyBackForwardList().size`)
+- Toolbar me `TextView` badge `ConstraintLayout` me
+
+---
+
+### 6. 🖥️ Desktop Mode Toggle
+
+**Kya hai:** Ek tap se site ka desktop version khule (mobile version nahi).
+
+**UI/UX:**
+```
+Top bar / overflow menu:  [🖥 Desktop: ON/OFF] toggle
+```
+- Icon: **monitor shape** 🖥 — active pe highlighted (primary color)
+- ON ho toh tooltip/toast: `"Desktop mode ON"`
+- Site card pe chhota "D" badge (jaise ki "ye desktop me khula hai")
+
+**User Workflow:**
+1. Site khuli mobile version me → layout chhota/adjust ho raha
+2. Toolbar pe **desktop icon** tap → page **reload desktop version** me
+3. Toggle off → wapas mobile version
+4. Preference **per-site save** (SiteUrlManager ki tarah SharedPreferences me)
+
+**Code:**
+- `WebActivity.kt` → do UserAgent strings (mobile UA already hai line 275, desktop UA add karo)
+- Toggle pe `settings.userAgentString = desktopUA` + `webView.reload()`
+- Prefs: `desktop_mode_sites` set
+
+---
+
+### 7. 🌙 Screen Dimmer / Night Overlay
+
+**Kya hai:** Raat me watching ke liye screen ki brightness app ke andar hi kam kar sakti hai (system brightness nahi chhedna).
+
+**UI/UX:**
+```
+[🌙 icon] tap → bottom slider panel:
+┌────────────────────────────┐
+│  ☀ ────●────── 🌚         │
+│  Brightness 45%            │
+└────────────────────────────┘
+```
+- Moon icon se **dim overlay** (black translucent View) WebView ke upar
+- Slider se **0–60% dim** (100% = normal, jyada dim = halka overlay)
+- Slider **auto-hide** 2 sec baad, dobara icon pe tap → wapas
+- Preference save — agli baar wahi brightness (raat wala mode)
+
+**User Workflow:**
+1. Raat me video dekh raha → 🌙 tap
+2. Slider aaya → dim kiya (aankhon pe comfortable)
+3. 2 sec baad slider gaya, video chalta rahe
+4. Brightness setting **per-app** hai — system pe asar nahi
+
+**Code:**
+- `WebActivity.kt` me root layout pe `View` (black, alpha = dim level), `bringToFront()` WebView ke upar lekin **controls ke neeche**
+- Slider = `SeekBar` in a small bottom panel
+- Prefs: `night_dim_level`
+
+---
+
+### 8. 🧯 Local Crash Logger
+
+**Kya hai:** App crash ho to reason file me save ho — agli baar bug report karne me pata chale (jaise abhi `error.txt` se build error pata chala).
+
+**UI/UX:**
+```
+Settings → About → [🐛 View crash log] 
+                    (agar koi crash hai toh green dot badge)
+```
+- Crash hone pe **koi UI nahi** (app already crash ho chuka) — bas file me save
+- Next launch pe **silent toast**: `"App pehle crash hua tha — details Settings me"`
+- Settings me screen: last 5 crashes with date + stacktrace (copy button)
+
+**User Workflow:**
+1. App crash hota hai
+2. User dobara kholta hai → halka toast
+3. Settings → About → Crash log → **Copy** → developer ko bhejta hai
+
+**Code:**
+- `MultiStreamApp.kt` me `Thread.setDefaultUncaughtExceptionHandler { t, e → File("crash_$(date).txt").write(stacktrace) }`
+- 10 se zyada log files ho toh purani delete (rotation)
+- Settings activity me list
+
+---
+
+## 🎯 PART B: MEDIUM FEATURES (1 hafte wale)
+
+---
+
+### 1. ▶️ Continue Watching
+
+**Kya hai:** Adha dekha hua video band kiya → app dobara khole toh home pe card dikhe **"Resume from 12:34"** — tap pe wahi page + wahi jagah.
+
+**UI/UX:**
+```
+MainActivity top:
+┌────────────────────────────────────┐
+│  ▶ Continue Watching               │
+│  ┌──────────┐ netmirror.com        │
+│  │ [thumb]  │ Inception (2010)     │
+│  │    45%   │ ⏱ Resume at 1:23:40  │
+│  └──────────┘      [Resume →]      │
+│  (horizontally scroll — 5 recent)  │
+└────────────────────────────────────┘
+```
+- **Horizontal carousel** — 5 recent interrupted sessions
+- Card pe: thumbnail (page title se placeholder), **progress bar 45%**, resume timestamp
+- Long press → "Remove from continue"
+- Swipe left → card remove (existing `SwipeItemTouchListener` reuse)
+
+**User Workflow:**
+1. User video dekh raha, **back/home** dabata hai (session save — time + URL + title)
+2. Kal app khole → home pe **"Continue Watching"** section top pe
+3. Card pe tap → WebActivity khulta hai + toast **"Resuming at 12:34"**
+4. Page load hone pe **JS inject** karke video player pe `currentTime = 12:34` set (site ke player ke `seek` API se — best effort)
+5. Video complete ho jaye / 7 din purane → card auto-remove
+
+**Code:**
+- `HistoryManager.kt` extend → `ResumeEntry(url, title, positionMs, updatedAt)` in SharedPreferences / local JSON
+- `WebActivity.kt` → `onPause()` me `video.getCurrentTime()` JS se lo (per-site player selector `CosmeticConfig` ki tarah)
+- `activity_main.xml` me `RecyclerView` (horizontal) + adapter
+
+---
+
+### 2. 🟣 Video Sniffer Floating Button (Killer Feature)
+
+**Kya hai:** Page me jo bhi video stream ho raha hai, ek **floating bubble** count dikhaye — tap pe format list (1080p/720p/audio-only) → seedha download.
+
+**UI/UX:**
+```
+WebView pe floating bubble (right side, draggable):
+   ┌─────┐
+   │  3  │   ← detected videos count
+   └─────┘
+
+Tap → bottom sheet:
+┌────────────────────────────────────┐
+│  🎬 3 videos found      [Refresh] │
+├────────────────────────────────────┤
+│  ▶ video_1080p.mp4    45 MB  [⬇️] │
+│  ▶ video_720p.mp4     22 MB  [⬇️] │
+│  🎵 audio_only.m4a    4 MB   [⬇️] │
+├────────────────────────────────────┤
+│  💡 Tip: video chalao,               │
+│     sniff accurate hota hai          │
+└────────────────────────────────────┘
+```
+- **Bubble:** 48dp circle, primary color, **drag** karke kahin bhi rakho (position save)
+- Count **live update** (VideoSniffer already `listener: ((Int) -> Unit)` deta hai — ready!)
+- Jab koi naya video detect ho → bubble pe **pulse animation** 1 sec
+- **Bottom sheet** (modal) — pehle thumbnail/title, size (HEAD request se), type icon (🎬/🎵)
+- Download tap → existing `HlsDownloader` flow → notification progress
+
+**User Workflow:**
+1. User streaming site kholta hai → video **play** karta hai (sniff accurate hota hai play pe)
+2. Right side pe **bubble "1"** pop hota hai (pulse ke saath)
+3. Bubble tap → sheet: **"1080p · 45MB"** dikhta hai
+4. **⬇️** tap → download start → notification me progress
+5. Sheet me **Refresh** → dobara sniff (naya stream aaya ho toh)
+6. Bubble ko drag karke corner me hata sakta hai
+
+**Code:**
+- `VideoSniffer.kt` me `listener` already hai → `WebActivity` me floating `View` (FrameLayout overlay, `OnTouchListener` se drag)
+- Bottom sheet = `BottomSheetDialog` (design library nahi chahiye toh custom `Dialog` bottom-aligned)
+- Size ke liye `HttpURLConnection` HEAD request (background thread)
+- Download button → `HlsDownloader.startDetectedMedia(detectedMedia)` — existing pipeline
+
+---
+
+### 3. ⏸️ Download Manager 2.0 (Pause/Resume + Queue)
+
+**Kya hai:** Downloads me **Pause/Resume**, **queue** (ek time pe sirf 2, baaki wait me) aur **parallel segment download** (speed 2-3x).
+
+**UI/UX (DownloadsActivity):**
+```
+┌────────────────────────────────────┐
+│  Active (1/2)                      │
+│ ┌────────────────────────────────┐ │
+│ │ movie.m3u8         45%  ⏸  ❌ │ │
+│ │ ████████████░░░░ 14 MB/s      │ │
+│ └────────────────────────────────┘ │
+│ ⏸ Paused / Queued                 │
+│ ┌────────────────────────────────┐ │
+│ │ episode2.m3u8   [▶ Resume]  ❌│ │
+│ ├────────────────────────────────┤ │
+│ │ song.m3u8      ⏳ Queued #2    │ │
+│ └────────────────────────────────┘ │
+│ ✅ Completed (3)  ▾                │
+└────────────────────────────────────┘
+```
+- **Status colors:** 🟢 downloading · 🟡 paused · ⚪ queued · 🔴 failed · ✅ done
+- Queue position dikhao: **"Queued #2"**
+- Swipe left → Delete (existing swipe reuse), swipe right → Pause/Resume toggle
+- Top pe **"Queue: 1/2 active"** summary
+- Settings: `Max parallel downloads: 1 | 2 | 3` (radio)
+
+**User Workflow:**
+1. 5 videos download start kiye (bubble se ya page se)
+2. Screen: **2 active**, 3 **queued** (position dikhta hai)
+3. Ek active pe **⏸** → wo paused, queue se **automatically next start** ho jata hai
+4. Paused pe **▶** → wahi jagah se resume (segment index save hai)
+5. App band → downloads **foreground service** me chalte rahe; app khole → state wapas restore
+6. Complete → Completed section me move, check mark + tick sound/toast
+
+**Code:**
+- `HlsDownloader.kt` → segment index + downloaded bytes `DownloadStore` me persist (resume ke liye)
+- `DownloadService.kt` → **queue manager**: `maxConcurrent = 2` semaphore, complete pe next dequeue
+- Parallel: segments ko `Executors.newFixedThreadPool(3)` me batch banao (already `Executors` import hai)
+- Pause = `AtomicBoolean` flag (already `AtomicBoolean` import hai — ready!)
+- `item_download.xml` me Resume/Pause button state
+
+---
+
+### 4. 🔒 Per-Site Lock
+
+**Kya hai:** `SiteLockManager` already hai (app-level) — extend karke **koi specific site** PIN se lock ho. Dusre ko phone do toh locked site khulni chahiye biometric/PIN maange.
+
+**UI/UX:**
+```
+Site card long press → menu:
+┌──────────────────────────┐
+│  ⭐ Add to Favorites      │
+│  🔒 Lock this site       │  ← NEW
+│  🖥 Open in Desktop mode │
+│  📋 Copy link             │
+└──────────────────────────┘
+
+Locked site tap pe:
+┌──────────────────────────┐
+│      🔒                   │
+│   Site is locked          │
+│   [Fingerprint]           │
+│   or                      │
+│   ● ● ● ●  (PIN)          │
+│        [Unlock]            │
+└──────────────────────────┘
+```
+- Locked card pe **chhota lock badge** 🔒 (title ke aage)
+- Unlock screen = existing biometric (USE_BIOMETRIC permission hai) + PIN fallback
+- 3 galat PIN → **30 sec cooldown** (brute force protection)
+
+**User Workflow:**
+1. Site card **long press** → "🔒 Lock this site"
+2. PIN confirm (2 baar) → card pe lock icon
+3. Doosra user us site pe tap → **lock screen** → fingerprint/PIN
+4. Sahi ho toh WebActivity khulta hai + **5 min session** (dobara lock nahi 5 min tak)
+5. Settings → Locked sites list → yahan se unlock/remove
+
+**Code:**
+- `SiteLockManager.kt` → `lockSite(url)`, `isLocked(url)` extend (abhi app-level hoga)
+- PIN hash (`SHA-256` + salt) SharedPreferences me
+- `MainActivity` site click pe check → `AppLockManager` ka biometric dialog reuse
+- `SiteAdapter.kt` me lock badge draw
+
+---
+
+### 5. 🟢 Site Health Status (Live Down Indicator)
+
+**Kya hai:** Home pe har site card pe **green/red dot** — pata chale kaunsi site chal rahi hai, kaunsi down/hacked hai. Pata chalta hai pata nahi.
+
+**UI/UX:**
+```
+┌────────────────────────────────┐
+│ [logo] NetMirror        🟢 ⭐  │  ← green = OK
+│        netmirror.xyz           │
+├────────────────────────────────┤
+│ [logo] OldSite          🔴 ⚠️  │  ← red + "Down"
+│        oldsite.com             │
+└────────────────────────────────┘
+```
+- Card top-right: **🟢 (ok) · 🔴 (down) · 🟡 (slow >3s)** + optional "⚠️ Down" text badge
+- **Refresh:** auto — app open pe background me HEAD request (batch, 3 concurrent), 10 min cache
+- Pull-to-refresh se manual re-check + last checked time ("checked 2 min ago")
+- **Filter:** top pe toggle `All | ✅ Working only` — down sites hide kar sake
+
+**User Workflow:**
+1. App khulta hai → dots **pehle se cached** dikhate hain (turant)
+2. Background me re-check chal raha (internet pe)
+3. Koi site down → 🔴 + toast/snackbar: **"2 sites down — tap to recheck"**
+4. Filter ON → sirf chalti hui sites
+5. Site pe tap hi kar de agar red hai → confirm dialog: **"Site not responding. Open anyway?"**
+
+**Code:**
+- `SiteUrlManager.kt` ya naya `SiteHealth.kt` → `ExecutorService` (3 thread) HEAD request, 5s timeout
+- Result SharedPreferences me `{url: {status, checkedAt}}`
+- `SiteAdapter.kt` me dot `ImageView` + state bind
+- `MultiStreamApp.kt` (Application) me init — MainActivity khulne se pehle cached data ready
+
+---
+
+### 6. 🧹 Auto Cache / Storage Cleaner
+
+**Kya hai:** App band pe ya manually — WebView cache, cookies, temp files clean ho, lekin **logged-in sites ka session bache** (whitelist).
+
+**UI/UX:**
+```
+Settings → Storage:
+┌────────────────────────────────────┐
+│  🧹 Clear on app exit              │
+│     [Toggle: OFF]                  │
+│                                    │
+│  🍪 Keep login on these sites:     │
+│     [netmirror ✕] [site2 ✕]  [+Add]│
+├────────────────────────────────────┤
+│  Current usage                     │
+│  Cache .............. 128 MB       │
+│  Cookies ............ 2.1 MB       │
+│  History ............ 45 entries   │
+│         [Clear Cache] [Clear All]  │
+└────────────────────────────────────┘
+```
+- **Toggle** — exit pe auto-clean
+- **Whitelist chips** — jahan login rehna chahiye (site add/remove)
+- Usage numbers **live** (`webView.cacheDir.size()`)
+- Danger zone: **"Clear All"** → confirm dialog (red)
+
+**User Workflow:**
+1. Settings → Storage → toggle ON **"Clear on app exit"**
+2. Sites jahan login chahiye → **+Add** se whitelist (abhi jo sites khuli hain unme se choose)
+3. Ab jab app band → cache/cookies clear, **whitelist sites logged-in**
+4. Manual: **"Clear Cache"** tap → size 128MB → 0 MB (toast me confirmation)
+
+**Code:**
+- `MultiStreamApp.kt` / `MainActivity.onDestroy` pe cleaner thread
+- Whitelist: `CookieManager` se per-URL cookie **export before / restore after** clear (ya `removeSessionCookies` excluding host)
+- Usage: `File(cacheDir).walkTopDown().sumOf { it.length() }` (background thread)
+
+---
+
+### 7. 📲 Share → WatchHub (ACTION_SEND)
+
+**Kya hai:** Kisi bhi app (YouTube, browser, Telegram) se link share karo → option aaye **"WatchHub me khole"** → app seedha us URL pe WebActivity khol de.
+
+**UI/UX:**
+```
+Browser/YouTube → Share →
+┌──────────────────────────────┐
+│  📤 Share via                │
+│  ● WatchHub    ← naya option │
+│  ● WhatsApp                 │
+│  ● Telegram                 │
+└──────────────────────────────┘
+
+→ App khulta hai → WebActivity with URL
+   + toast: "Opened in WatchHub"
+```
+- App **already open** ho toh naya task nahi — existing WebActivity me URL load (singleTask hai manifest me — ready!)
+- Share kiya URL **History** me bhi aaye (tracking consistent)
+
+**User Workflow:**
+1. YouTube/any app me video link **Share**
+2. List me **WatchHub icon** tap
+3. App → WebActivity me site khulti hai
+4. Download karna ho → sniffer bubble se normal flow
+
+**Code:**
+- `AndroidManifest.xml` → MainActivity (ya naya `ShareActivity`) me:
+```xml
+<intent-filter>
+  <action android:name="android.intent.action.SEND"/>
+  <category android:name="android.intent.category.DEFAULT"/>
+  <data android:mimeType="text/plain"/>
+</intent-filter>
+```
+- `intent.getStringExtra(Intent.EXTRA_TEXT)` → URL validate → WebActivity launch
+- **Spam protection:** sirf http/https accept, baaki ignore
+
+---
+
+## 🚀 PART C: BIG FEATURES (2+ hafte)
+
+---
+
+### 1. 🤖 AI Page Summary (History me smart cards)
+
+**Kya hai:** Page kholne pe **auto summary** (2-3 line) + smart title generate ho — History/Favorites me sirf URL nahi, **content ka gist** dikhe.
+
+**UI/UX:**
+```
+History:
+┌────────────────────────────────────┐
+│  📄 "Inception explained —        │
+│      dreaming within dreams"       │  ← AI title (page title nahi)
+│  Summary: Film ka plot multi-level │
+│  dream pe based hai...             │  ← 2 line gist
+│  netmirror.xyz · 2 hr ago    [▶]  │
+└────────────────────────────────────┘
+```
+- Card pe **expandable summary** (tap pe poori)
+- Summary badge: **"🤖 AI"** (pata chale AI ka hai, page ka nahi)
+- Loading: card skeleton shimmer (1-2 sec)
+- **Offline mode:** sirf on-device extractive summary (page ke heading + first para se) — no API needed
+
+**User Workflow:**
+1. User page padhta hai (30+ sec ruka)
+2. Background me **text extract** (JS se `document.body.innerText`)
+3. Summary generate → History save hota hai
+4. Kal History kholta hai → **title + gist** dikhta hai → tap pe wahi page
+5. **No internet** toh basic title (page `<title>`) fallback
+
+**Code:**
+- `WebActivity.kt` → JS interface method `extractPageText()` (timeout 500ms, max 5000 chars)
+- Summary engine (2 options):
+  - **Free/offline:** pehle `<h1>/<h2>` + first 2 sentences join (no dependency)
+  - **API (optional setting):** lightweight summarization API call (user key Settings me)
+- `HistoryManager.kt` me `summary` field add, `HistoryActivity` / `item_*.xml` me UI
+
+---
+
+### 2. 🎬 Built-in Custom Player (Sniffed URL ke liye)
+
+**Kya hai:** Site ke player ke bajaye **app ka apna player** — fullscreen, speed control, A-B repeat, lock, gesture (brightness/volume swipe). Site player limited hota hai.
+
+**UI/UX:**
+```
+┌────────────────────────────────┐
+│ ← Inception.mp4        ⚙️ 🔒 📐 │  ← settings, lock, ratio
+│                                │
+│         VIDEO AREA             │
+│                                │
+│  ◄◄ 10s   ▶/⏸   10s ►►        │
+│  ████████●─────── 1:23:45 / 2:00│
+│                                │
+│  ⏩ 1.0x  [A●━━━B]  📺 Cast    │  ← speed, A-B repeat
+└────────────────────────────────┘
+```
+- **Gestures:** left swipe = brightness, right swipe = volume, double tap = ±10s, pinch = zoom/aspect
+- **Speed:** 0.25x – 2x (long press = 2x turbo, release = normal)
+- **A-B Repeat:** A point set → B point set → loop (learning ke liye)
+- **📐 Aspect:** Fit / Fill / 16:9 / Stretch toggle
+- **🔒 Lock:** controls lock (bacchon ke liye), unlock = double tap + long press
+- Top: filename + **Download** (agar stream hai) + **Share**
+
+**User Workflow:**
+1. Sniffer sheet se ya page se **"Open in Player"**
+2. Player khulta hai, video auto-play, controls fade (3 sec)
+3. Swipe kare = brightness/volume, double tap = seek
+4. Speed **1.5x** set kiya → setting video tak ya "always" (pref)
+5. A-B repeat set → loop chale (dance step seekhna ho)
+6. Back → wapas WebActivity, **playback position save** (Continue Watching me)
+
+**Code:**
+- **Zero-dependency option:** `VideoView` + custom controls (FrameLayout + MediaPlayer) — HLS ke liye `MediaPlayer` + `m3u8` parse karna padega (tough)
+- **Recommended:** **Media3/ExoPlayer** add karo (Google ka, free) — HLS native support, 1 dependency:
+  ```kotlin
+  dependencies { implementation("androidx.media3:media3-exoplayer:1.x") }
+  ```
+  *(Note: app ka philosophy "zero dependency" hai — decision tumhara)*
+- `PlayerActivity.kt` naya + Manifest register
+- Gestures: `GestureDetector` + `WindowManager.LayoutParams.screenBrightness`
+
+---
+
+### 3. 🕵️ Incognito / Guest Mode
+
+**Kya hai:** Ek mode jisme kuch bhi **save nahi hota** — history, cache, cookies, download metadata sab session end pe wipe.
+
+**UI/UX:**
+```
+Top bar toggle:  🕶 [Guest Mode: OFF] 
+
+ON pe:
+- Toolbar pe chhota 🕶 badge (pata chale mode ON hai)
+- App icon pe notification? nahi — bas in-app indicator
+- History screen pe banner: "🕶 Guest mode — nothing is being saved"
+```
+- Toggle ON → **confirm sheet**: *"Browsing history, cookies aur cache session end pe delete ho jayenge. Saved passwords sites ke andar rehte hain (site dependent)."*
+- App **force close** pe bhi wipe (Application `onTerminate` + next-launch cleanup marker)
+
+**User Workflow:**
+1. Toolbar pe **🕶 tap** → confirm → **Guest ON** (badge dikhta hai)
+2. Kuch bhi browse kare — **History me kuch nahi jata**, AdBlock chalta rahe
+3. Downloads manually initiated = allowed (file save hogi, metadata nahi)
+4. Mode OFF → confirmation: **"End session & clear session data?"** → sab wipe
+5. App crash/band → next launch pe **orphan session auto-wipe**
+
+**Code:**
+- Flag `guest_mode` in prefs + `MultiStreamApp` me session marker file
+- `HistoryManager.save()` / `FavoritesManager` / `DownloadStore` — sab entry pe `if (guestMode) return`
+- Cookie: guest me `CookieManager.flush()` skip + exit pe `removeSessionCookies()`
+- WebView: `incognito` mode nahi hota WebView me — **manual isolation** karna padega (separate profile dir nahi hota, toh explicit cleanup)
+
+---
+
+### 4. 📊 Download Stats Dashboard
+
+**Kya hai:** Kitna download hua — aaj/hafte/mahine ka data, per-site breakdown, charts.
+
+**UI/UX:**
+```
+Downloads → Stats tab:
+┌────────────────────────────────────┐
+│  📥 This month: 4.2 GB · 38 files │
+├────────────────────────────────────┤
+│  Bar chart (last 7 days)           │
+│  ▂▅█▇▃▆▄  (Mon→Sun)               │
+├────────────────────────────────────┤
+│  By site (donut chart):            │
+│  🟦 netmirror  62%                 │
+│  🟩 site2      25%                 │
+│  🟨 others     13%                 │
+├────────────────────────────────────┤
+│  ⏱ Avg speed: 11.2 MB/s           │
+│  📁 Total storage used: 8.4 GB     │
+│              [Clear stats]         │
+└────────────────────────────────────┘
+```
+- **Tabs:** Overview | By Site | Raw List
+- Charts **hand-drawn** (Canvas me arc/bars) — koi chart library nahi
+- Date filter chips: **7D | 30D | All**
+- Export: **CSV share** button (stats analysis ke liye)
+
+**User Workflow:**
+1. Downloads screen → **Stats** tab
+2. Dikhta hai: month total, daily bar chart, site-wise donut
+3. **30D** chip → last month ka data
+4. Site name pe tap → sirf uski files list
+5. **CSV** → share to sheet/Excel
+
+**Code:**
+- `DownloadStore.kt` → entry me `siteHost`, `sizeBytes`, `completedAt` (agar nahi hai toh migrate)
+- Aggregation: SQL nahi, **in-memory groupBy** (data small hai)
+- Charts: custom `View` me `canvas.drawArc()` / `drawRect()`
+- `activity_stats.xml` + `StatsActivity` (ya DownloadsActivity ka tab)
+
+---
+
+### 5. 🔗 Deep Linking + App Shortcuts
+
+**Kya hai:** (a) `watchhub://open?url=...` se app khule; (b) Launcher **long-press** pe direct shortcuts — Favorites, Downloads, New Tab.
+
+**UI/UX:**
+```
+Launcher long-press icon:
+┌────────────────────┐
+│  🔍 Search sites    │
+│  ⬇️ Downloads (3)    │  ← badge count
+│  ⭐ Favorites        │
+│  ▶ Continue Watching│
+└────────────────────┘
+
+Browser me link click (watchhub://):
+→ App khulta hai directly wahi page
+```
+- Shortcut badges: **Downloads pending count** live update (`ShortcutManager`)
+- Telegram/website se `watchhub://open?url=xyz` link → app opens page
+
+**User Workflow:**
+1. Home screen app icon **long press**
+2. Menu → **"Downloads (3)"** tap → seedha downloads screen (app ke through nahi, direct)
+3. Doosri jagah se share link `watchhub://` → app → page khula
+4. Download start hote hi badge **(4)** update next launch pe
+
+**Code:**
+- Manifest: `<intent-filter>` with `android:scheme="watchhub"` + **App Links** (`https://watchhub.app`) — verify domain chahiye (assetlinks.json)
+- `MultiStreamApp` me `ShortcutManager.addDynamicShortcuts()` — counts `DownloadStore` se
+- **Note:** dynamic shortcuts API 25+ (minSdk 21 pe legacy launcher fallback ignore karega — thik hai)
+
+---
+
+### 6. 🗂️ Auto-Sort Downloads into Folders
+
+**Kya hai:** Downloads automatically `Movies/`, `Music/`, `Clips/` me jayein file type ke hisaab se.
+
+**UI/UX:**
+```
+Downloads → filter chips:
+[All] [🎬 Video] [🎵 Audio] [📄 Other]
+
+Settings → Downloads:
+┌────────────────────────────────┐
+│  📁 Auto-sort by type     [ON] │
+│     Movies/ · Music/ · Clips/  │
+│  📂 Create folder per site[OFF]│
+│     netmirror/ , site2/        │
+└────────────────────────────────┘
+```
+- In-app chips se **view filter** (files actually folders me jaati hain)
+- File manager me bhi dikhenge folders (Downloads/WatchHub/Movies/…)
+
+**User Workflow:**
+1. Setting ON (default)
+2. Movie download → **WatchHub/Movies/** me
+3. Song → **WatchHub/Music/** me
+4. App ke Downloads screen pe chips se filter
+5. **Per-site folder** option ON → `WatchHub/netmirror/` (site ke through download sab jagah)
+
+**Code:**
+- `HlsDownloader.kt` me final `File` path: extension se decide (`.mp4/.mkv` → Movies, `.m4a/.mp3` → Music)
+- `MediaStore` move (API 29+) ya `File.renameTo` (legacy + WRITE_EXTERNAL_STORAGE maxSdk 28 hai — ready)
+- Site folder = `SiteUrlManager` se host nikal ke sanitize
+
+---
+
+### 7. 🌍 Multi-Language (Hindi + Regional)
+
+**Kya hai:** Poora UI **Hindi** (aur baaki regional) me — abhi sab hardcoded English hai (`strings.xml` me sirf 12 strings).
+
+**UI/UX:**
+```
+Settings → Language:
+( • ) English
+(   ) हिन्दी
+(   ) বাংলা
+(   ) தமிழ்
+(   ) తెలుగు
+
+→ App turant restart nahi — locale change + recreate()
+```
+- Sirf **labels translate** — site names/content nahi
+- Settings pe language picker (system default follow bhi kare)
+- Locale-aware **number/date format** (12.5 MB → १२.५? — optional, rehne do)
+
+**User Workflow:**
+1. App install → **system language detect** (Hindi phone pe → Hindi UI)
+2. Settings → Language → Tamil select → UI **turant change** (activity recreate)
+3. Naya string add → 4 files me add (`values-hi`, `values-bn`, `values-ta`, `values-te`)
+
+**Code:**
+- Pehle **sabhi hardcoded strings** `strings.xml` me move karo (WebActivity me dialogs, UpdateManager, DownloadsActivity — sab)
+- `values-hi/strings.xml` etc. — Google Translate + review
+- Locale helper: `AppCompatDelegate.setApplicationLocales()` — *nahi, wo AppCompat library maangta hai* → **manual**: `createConfigurationContext()` + `recreate()` (zero dependency)
+- **~200 strings** approximate — 2-3 din ka migration
+
+---
+
+### 8. 📴 PWA-style Offline Pages
+
+**Kya hai:** Jo sites baar baar kholta hai unki **cached copy** offline bhi khule + offline hone pe friendly page (error ki jagah).
+
+**UI/UX:**
+```
+Site card pe toggle:  [📥 Offline save]  (long press menu)
+
+Offline:
+┌──────────────────────────────────┐
+│  📴 You're offline                │
+│                                   │
+│  Saved pages available:           │
+│  ✅ netmirror.xyz  (saved today) │
+│  ✅ site2.com      (saved Sep 20)│
+│                                   │
+│  [Open saved copy]                │
+└──────────────────────────────────┘
+```
+- **Error page replace** — `onReceivedError` (line 300 jo error de raha tha!) me custom offline view — **VPN notice ki jagah proper offline screen**
+- Offline saved pages: **text + images** (WebView cache full page save mushkil — simpler: last cached HTML)
+- Card pe **green down-arrow badge** = offline available
+- Auto-refresh: WiFi pe background re-save (stale hone se pehle)
+
+**User Workflow:**
+1. Site card long press → **📥 Save offline**
+2. Progress: "Saving…" → "✅ Saved (2.4 MB)"
+3. **Flight mode** me app kholta hai → home pe saved badges green
+4. Saved site tap → **cached copy** khulta hai (images bhi)
+5. Doosri site (not saved) tap → **offline screen** — "Connect to internet" + Retry button
+6. WiFi pe app khule → auto re-save (date dikhe "updated 5 min ago")
+
+**Code:**
+- `WebArchive`/cache: **simplest** — `WebView.getHitTestResult` nahi... use **`WebViewClient.shouldInterceptRequest`** wrapper jo cached response de offline ho (aggressive caching layer, `LruCache` me responses)
+- Ya lighter: sirf **error page fix** (abhi VPN notice galat jagah show hota hai offline pe) + `assets/` se offline HTML template
+- Offline detect: `ConnectivityManager` (ACCESS_NETWORK_STATE permission hai — ready)
+- Save flag: `offline_sites` set + cacheDir per-site folder
+
+---
+
+## 🛡️ PART D: Security Fixes (bonus — already pending)
+
+| # | Fix | UI/UX | Workflow |
+|---|---|---|---|
+| 1 | **Hardcoded keystore password** | Settings → Build → password prompt (ya CI env var) | Gradle `keystore.properties` (gitignored) se read |
+| 2 | **SSL proceed() warning** | Dialog: *"SSL certificate issue — site may be unsafe. Open anyway?"* | ⚠️ Show → user [Open anyway] / [Back] |
+| 3 | **CI build fix** (`WebResourceError`) | — | `if (Build.VERSION.SDK_INT >= 23)` guard ya worker SDK update |
+
+---
+
+## 🗺️ Priority Roadmap (recommendation)
+
+```
+Week 1 (Quick):    4-Speed/ETA  →  5-Back badge  →  8-Crash logger
+Week 2 (Medium):   2-Sniffer Bubble ⭐  →  1-Continue Watching
+Week 3 (Medium):   3-Download Queue/Pause  →  5-Site Health
+Week 4 (Polish):   6-Desktop mode  →  7-Night dimmer  →  3-Search
+Later (Big):       Custom Player  →  Offline Pages  →  Hindi  →  Incognito
+Always:            Security fixes (Part D) parallel me
+```
+
+**⭐ Sabse pehle Sniffer Bubble banao** — kyunki `VideoSniffer.kt` me `listener` ready hai, bas UI chahiye — **app ka USP ban jayega**.
+
+---
+
+Bolo kaunsa feature **abhi start karun** — main **poora code likh ke de deta hoon** (files, XML, workflow sab)! 🚀
