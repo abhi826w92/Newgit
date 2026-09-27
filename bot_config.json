@@ -8,7 +8,8 @@
   ],
   "manually_stopped_scripts": [
     "mystore-bot-vps",
-    "Ghidrabot vps/bot.py"
+    "Ghidrabot vps/bot.py",
+    "Ghidrabot vps"
   ],
   "auto_run_file": null,
   "env_vault": {
