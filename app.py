@@ -411,8 +411,8 @@ def git_sync_to_github(commit_message="Update via Telegram Controller"):
                     logger.info(f"Auto-sync to cloud complete via origin: {commit_message}")
                     return True, "Cloud sync complete! All changes backed up."
 
-            # Rebase with -X theirs so local deletions/updates strictly take precedence over remote!
-            rebase_res = subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "theirs", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
+            # Rebase with -X ours so upstream remote commits take precedence over stale runner clones!
+            rebase_res = subprocess.run(["git", "pull", "--rebase", "--autostash", "-X", "ours", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
             if rebase_res.returncode != 0:
                 subprocess.run(["git", "rebase", "--abort"], cwd=WORKSPACE_DIR, capture_output=True)
                 subprocess.run(["git", "pull", "--no-rebase", "-X", "theirs", remote_url, target_branch], cwd=WORKSPACE_DIR, capture_output=True)
@@ -1849,23 +1849,29 @@ def handle_text_message(chat_id, user_id, text):
                 var_lines.append(f"<i>...and {len(parsed_vars) - 15} more variables</i>")
 
             rel_dot_env = os.path.relpath(info["primary_dot_env"], WORKSPACE_DIR)
-            restart_hint = ""
+            restarted_note = ""
             if is_running:
-                restart_hint = "\n\n⚡ <i>This script is currently RUNNING. Tap <b>🔄 Apply & Restart</b> below to load new variables immediately!</i>"
+                rst_ok, rst_msg = start_child_app(info["entry_script"], force_restart=True)
+                if rst_ok:
+                    restarted_note = f"\n\n🟢 <b>Real-Time Auto-Restart:</b> <code>{info['display_name']}</code> was automatically restarted with the new environment variables!"
+                else:
+                    restarted_note = f"\n\n⚠️ <i>Script was running, but auto-restart reported: {rst_msg}</i>"
+            else:
+                restarted_note = "\n\nℹ️ <i>Script is stopped. New variables will take effect automatically when started.</i>"
 
             confirm_text = (
                 f"✅ <b>Variables Saved for <code>{info['display_name']}</code>!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Variables Added / Updated ({len(parsed_vars)}):</b>\n"
                 + "\n".join(var_lines)
-                + f"\n\n📁 Saved to <code>{rel_dot_env}</code> and backed up to Cloud!"
-                + restart_hint
+                + f"\n\n📁 Saved to <code>{rel_dot_env}</code> & synchronized to Cloud!"
+                + restarted_note
             )
             buttons = [
                 [{"text": f"⚙️ Manage {info['display_name']} ENV", "callback_data": f"env_dash_{info['slug']}"}]
             ]
             if is_running:
-                buttons.append([{"text": "🔄 Apply & Restart Script", "callback_data": f"exec_run_{running_key}"}])
+                buttons.append([{"text": "🔄 Restart Script Again", "callback_data": f"exec_run_{running_key}"}])
             else:
                 buttons.append([{"text": f"▶️ Run {info['display_name']} Now", "callback_data": f"exec_run_{info['entry_script']}"}])
             buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
@@ -2878,8 +2884,17 @@ def prompt_env_delete_list(chat_id, user_id, py_filename, message_id=None):
     info = resolve_env_target_info(py_filename)
     env_vars = read_script_env(info["name"])
     if not env_vars:
-        text = f"ℹ️ No variables to delete for <code>{info['display_name']}</code>."
-        markup = {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"env_dash_{info['slug']}"}]]}
+        text = (
+            f"ℹ️ <b>No Variables Found</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"There are no environment variables configured for <code>{info['display_name']}</code>."
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "➕ Add Variable", "callback_data": f"env_add_{info['slug']}"}],
+                [{"text": "🔙 Back to ENV Dashboard", "callback_data": f"env_dash_{info['slug']}"}]
+            ]
+        }
     else:
         sorted_keys = sorted(env_vars.keys())
         user_states[user_id] = {
@@ -2889,14 +2904,16 @@ def prompt_env_delete_list(chat_id, user_id, py_filename, message_id=None):
             "keys": sorted_keys
         }
         text = (
-            f"🗑️ <b>Delete Variable from <code>{info['display_name']}</code>:</b>\n\n"
-            "Tap a variable below to remove it:"
+            f"🗑️ <b>Delete Variable from <code>{info['display_name']}</code>:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Total variables: <b>{len(sorted_keys)}</b>\n\n"
+            "Tap any variable below to delete it immediately in real-time:"
         )
         buttons = []
         for idx, k in enumerate(sorted_keys[:40]):
-            buttons.append([{"text": f"❌ Delete {k}", "callback_data": f"env_dv_{idx}"}])
+            buttons.append([{"text": f"❌ Delete {k}", "callback_data": f"env_delk_{info['slug']}:::{idx}"}])
         buttons.append([{"text": "💣 Wipe All Variables", "callback_data": f"env_wipe_{info['slug']}"}])
-        buttons.append([{"text": "🔙 Back", "callback_data": f"env_dash_{info['slug']}"}])
+        buttons.append([{"text": "🔙 Back to ENV Dashboard", "callback_data": f"env_dash_{info['slug']}"}])
         markup = {"inline_keyboard": buttons}
     
     if message_id:
@@ -3850,68 +3867,122 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         answer_callback(callback_id)
         prompt_env_delete_list(chat_id, user_id, info["name"], message_id)
 
-    # 2f. Do Delete Variable (Index-based)
-    elif data.startswith("env_dv_"):
-        idx_str = data.replace("env_dv_", "")
-        state = user_states.get(user_id, {})
-        target = state.get("target")
-        keys = state.get("keys", [])
-        try:
-            idx = int(idx_str)
-            if 0 <= idx < len(keys):
-                var_key = keys[idx]
-                env_dict = read_script_env(target)
-                env_dict.pop(var_key, None)
-                write_script_env(target, env_dict)
-                answer_callback(callback_id, f"🗑️ {var_key} deleted!", show_alert=True)
-                prompt_script_env_dashboard(chat_id, user_id, target, message_id)
+    # 2f. Do Delete Variable (Stateless Slug + Index or Key with Real-Time Process Restart)
+    elif data.startswith("env_delk_") or data.startswith("env_dv_") or data.startswith("env_dodel_"):
+        target_slug = ""
+        var_key = None
+        idx = None
+        
+        if data.startswith("env_delk_"):
+            raw = data.replace("env_delk_", "")
+            if ":::" in raw:
+                target_slug, idx_str = raw.split(":::", 1)
+                try:
+                    idx = int(idx_str)
+                except Exception:
+                    pass
+        elif data.startswith("env_dodel_"):
+            raw = data.replace("env_dodel_", "")
+            if ":::" in raw:
+                target_slug, var_key = raw.split(":::", 1)
             else:
-                answer_callback(callback_id, "Variable not found.", show_alert=True)
-        except Exception as e:
-            logger.error(f"env_dv error: {e}")
-            answer_callback(callback_id, "Error deleting variable.", show_alert=True)
+                parts = raw.split("_", 1)
+                target_slug, var_key = (parts[0], parts[1]) if len(parts) == 2 else ("", "")
+        elif data.startswith("env_dv_"):
+            raw = data.replace("env_dv_", "")
+            if ":::" in raw:
+                target_slug, idx_str = raw.split(":::", 1)
+                try:
+                    idx = int(idx_str)
+                except Exception:
+                    pass
+            else:
+                state = user_states.get(user_id, {})
+                target_slug = state.get("slug") or state.get("target")
+                try:
+                    idx = int(raw)
+                except Exception:
+                    pass
 
-    # 2f1. Do Delete Variable (Legacy format compatibility)
-    elif data.startswith("env_dodel_"):
-        raw = data.replace("env_dodel_", "")
-        if ":::" in raw:
-            fname, var_key = raw.split(":::", 1)
-        else:
-            parts = raw.split("_", 1)
-            fname, var_key = (parts[0], parts[1]) if len(parts) == 2 else ("", "")
-            
-        if fname and var_key:
-            info = resolve_env_target_info(fname)
+        if target_slug:
+            info = resolve_env_target_info(target_slug)
             env_dict = read_script_env(info["name"])
-            env_dict.pop(var_key, None)
-            write_script_env(info["name"], env_dict)
-            answer_callback(callback_id, f"🗑️ {var_key} deleted in real-time!", show_alert=True)
-            prompt_script_env_dashboard(chat_id, user_id, info["name"], message_id)
+            sorted_keys = sorted(env_dict.keys())
+            
+            if var_key is None and idx is not None:
+                if 0 <= idx < len(sorted_keys):
+                    var_key = sorted_keys[idx]
+                    
+            if var_key and var_key in env_dict:
+                env_dict.pop(var_key, None)
+                write_script_env(info["name"], env_dict)
+                
+                # Real-Time Restart if this target is currently active
+                active = get_active_running_processes()
+                is_running = (
+                    info["entry_script"] in active or
+                    info["name"] in active or
+                    any(k.startswith(f"{info['name']}/") or k == info['name'] for k in active.keys())
+                )
+                if is_running:
+                    start_child_app(info["entry_script"], force_restart=True)
+                    answer_callback(callback_id, f"🗑️ {var_key} deleted & bot restarted in real time!", show_alert=True)
+                else:
+                    answer_callback(callback_id, f"🗑️ {var_key} deleted in real time!", show_alert=True)
+                    
+                prompt_env_delete_list(chat_id, user_id, info["name"], message_id)
+            else:
+                answer_callback(callback_id, "Variable not found or already deleted.", show_alert=True)
+                prompt_env_delete_list(chat_id, user_id, info["name"], message_id)
+        else:
+            answer_callback(callback_id, "Target project not found.", show_alert=True)
 
-    # 2f2. Wipe Single Script's / Project's Environment Variables
+    # 2f2. Wipe Single Script's / Project's Environment Variables in Real-Time
     elif data.startswith("env_wipe_one_") or data.startswith("env_wipe_"):
         fname = data.replace("env_wipe_one_", "").replace("env_wipe_", "")
         info = resolve_env_target_info(fname)
-        answer_callback(callback_id, f"Wiping environment for {info['display_name']}...")
         
         # 1. Clear from vault
         vault = load_env_vault()
-        for vk in info["vault_keys"]:
+        for vk in info.get("vault_keys", []):
+            vault.pop(vk, None)
+        for vk in info.get("vault_save_keys", []):
             vault.pop(vk, None)
         save_env_vault(vault)
         
-        # 2. Delete physical .env files on disk
-        for ef in info["env_file_candidates"]:
+        # 2. Delete all physical .env and env files across all project directories
+        for ef in info.get("env_file_candidates", []):
             if os.path.exists(ef):
                 try:
                     os.remove(ef)
                 except Exception:
                     pass
-                    
-        # 3. Synchronize deletion to GitHub in background
+        for td in info.get("all_project_dirs", []):
+            if os.path.isdir(td):
+                for f in os.listdir(td):
+                    if f.startswith(".env") or f == "env" or f.endswith(".env"):
+                        try:
+                            os.remove(os.path.join(td, f))
+                        except Exception:
+                            pass
+                            
+        # 3. Real-Time Process Management: Stop running child process so old secrets do not persist in memory
+        active = get_active_running_processes()
+        is_running = (
+            info["entry_script"] in active or
+            info["name"] in active or
+            any(k.startswith(f"{info['name']}/") or k == info['name'] for k in active.keys())
+        )
+        if is_running:
+            stop_child_app(info["entry_script"], clear_active=False)
+            
+        # 4. Synchronize deletion to GitHub in background
         threading.Thread(target=git_sync_to_github, args=(f"Wipe .env variables for {info['display_name']}",), daemon=True).start()
         
-        answer_callback(callback_id, f"✅ Environment wiped for {info['display_name']}!", show_alert=True)
+        if is_running:
+            answer_callback(callback_id, f"💣 All variables wiped & {info['display_name']} stopped in real time!", show_alert=True)
+        else:
+            answer_callback(callback_id, f"✅ Environment wiped for {info['display_name']} in real time!", show_alert=True)
         prompt_script_env_dashboard(chat_id, user_id, info["name"], message_id)
 
     # 2f3. Wipe All Script Environments Confirmation Prompt
@@ -3933,8 +4004,6 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
     # 2f4. Execute Wipe All Script Environments in Real-Time
     elif data == "do_env_wipe_all":
-        answer_callback(callback_id, "Wiping all environments...")
-        
         # 1. Clear entire vault
         config["env_vault"] = {}
         save_config(config)
@@ -3945,19 +4014,33 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         except Exception:
             pass
             
-        # 2. Delete all physical .env files across scripts/ directory
+        # 2. Delete all physical .env and env files across workspace
         for root, _, fs in os.walk(SCRIPTS_DIR):
             for f in fs:
-                if f.endswith(".env") or f == ".env":
+                if f.startswith(".env") or f == "env" or f.endswith(".env"):
                     try:
                         os.remove(os.path.join(root, f))
                     except Exception:
                         pass
                         
-        # 3. Synchronize deletion to GitHub in background
+        for f in os.listdir(WORKSPACE_DIR) if os.path.exists(WORKSPACE_DIR) else []:
+            if f.startswith(".env") or f == "env" or f.endswith(".env"):
+                try:
+                    p = os.path.join(WORKSPACE_DIR, f)
+                    if os.path.isfile(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+
+        # 3. Stop all running child processes in real-time
+        active = get_active_running_processes()
+        for k in list(active.keys()):
+            stop_child_app(k, clear_active=False)
+            
+        # 4. Synchronize deletion to GitHub in background
         threading.Thread(target=git_sync_to_github, args=("Wipe all per-script .env vaults via Telegram",), daemon=True).start()
         
-        answer_callback(callback_id, "✅ All .env variables deleted successfully in real-time!", show_alert=True)
+        answer_callback(callback_id, "💣 All .env variables wiped & running bots stopped in real time!", show_alert=True)
         prompt_env_script_select(chat_id, user_id, message_id)
 
     # 2g. Export .env file
@@ -4998,11 +5081,8 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         if raw_target in ["all", "all_prompt"]:
             return
             
-        answer_callback(callback_id, f"🗑️ Deleting in real-time...", show_alert=False)
-        
         ok, info = purge_project_or_script_completely(raw_target)
-        
-        answer_callback(callback_id, f"🗑️ {info['display_name']} and all associated files/ENVs deleted everywhere!", show_alert=True)
+        answer_callback(callback_id, f"🗑️ {info['display_name']} & all associated files/ENVs deleted everywhere!", show_alert=True)
         show_files_view(chat_id, message_id)
 
     # 11. Pip prompt
