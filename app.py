@@ -1796,37 +1796,69 @@ def handle_text_message(chat_id, user_id, text):
     elif isinstance(state, dict) and state.get("action") == "WAITING_ENV_VAR":
         target_py = state.get("target_py", "bot.py")
         user_states.pop(user_id, None)
+        info = resolve_env_target_info(target_py)
         
-        if "=" in raw_text:
-            key, val = raw_text.split("=", 1)
-            key = key.strip().upper()
-            val = val.strip()
+        # Parse single or multi-line environment variables
+        parsed_vars = {}
+        for line in raw_text.strip().split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k:
+                    parsed_vars[k] = v
+                    
+        if parsed_vars:
+            env_dict = read_script_env(info["name"])
+            env_dict.update(parsed_vars)
+            ok, msg = write_script_env(info["name"], env_dict)
             
-            env_dict = read_script_env(target_py)
-            env_dict[key] = val
-            ok, msg = write_script_env(target_py, env_dict)
-            
-            masked = mask_secret_val(val)
-            base_n = target_py.rsplit('.', 1)[0]
-            confirm_text = (
-                f"✅ <b>Variable Saved for <code>{target_py}</code>!</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 🔑 <code>{key}</code> = <code>{masked}</code>\n\n"
-                f"📁 Saved to dedicated <code>scripts/{base_n}.env</code> and backed up to Cloud!"
+            # Check if this target is currently running
+            active = get_active_running_processes()
+            is_running = (
+                info["entry_script"] in active or
+                info["name"] in active or
+                any(k.startswith(f"{info['name']}/") or k == info['name'] for k in active.keys())
             )
-            markup = {
-                "inline_keyboard": [
-                    [{"text": f"⚙️ Manage {target_py} ENV", "callback_data": f"env_dash_{target_py}"}],
-                    [{"text": f"▶️ Run {target_py}", "callback_data": f"exec_run_{target_py}"}],
-                    [{"text": "🔙 Main Menu", "callback_data": "menu_main"}]
-                ]
-            }
-            send_tg_message(chat_id, confirm_text, reply_markup=markup)
+            running_key = next((k for k in active.keys() if k == info["entry_script"] or k == info["name"] or k.startswith(f"{info['name']}/")), info["entry_script"]) if is_running else info["entry_script"]
+
+            var_lines = []
+            for k, v in sorted(parsed_vars.items())[:15]:
+                var_lines.append(f"• 🔑 <code>{k}</code> = <code>{mask_secret_val(v)}</code>")
+            if len(parsed_vars) > 15:
+                var_lines.append(f"<i>...and {len(parsed_vars) - 15} more variables</i>")
+
+            rel_dot_env = os.path.relpath(info["primary_dot_env"], WORKSPACE_DIR)
+            restart_hint = ""
+            if is_running:
+                restart_hint = "\n\n⚡ <i>This script is currently RUNNING. Tap <b>🔄 Apply & Restart</b> below to load new variables immediately!</i>"
+
+            confirm_text = (
+                f"✅ <b>Variables Saved for <code>{info['display_name']}</code>!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Variables Added / Updated ({len(parsed_vars)}):</b>\n"
+                + "\n".join(var_lines)
+                + f"\n\n📁 Saved to <code>{rel_dot_env}</code> and backed up to Cloud!"
+                + restart_hint
+            )
+            buttons = [
+                [{"text": f"⚙️ Manage {info['display_name']} ENV", "callback_data": f"env_dash_{info['slug']}"}]
+            ]
+            if is_running:
+                buttons.append([{"text": "🔄 Apply & Restart Script", "callback_data": f"exec_run_{running_key}"}])
+            else:
+                buttons.append([{"text": f"▶️ Run {info['display_name']} Now", "callback_data": f"exec_run_{info['entry_script']}"}])
+            buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
+            
+            send_tg_message(chat_id, confirm_text, reply_markup={"inline_keyboard": buttons})
         else:
             send_tg_message(
                 chat_id,
-                "⚠️ <b>Invalid Format!</b>\n\nPlease send in <code>KEY=VALUE</code> format.\n(Example: <code>BOT_TOKEN=123456:AAH...</code>)",
-                reply_markup={"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"env_dash_{target_py}"}]]}
+                "⚠️ <b>Invalid Format!</b>\n\nPlease send variables in <code>KEY=VALUE</code> format.\n(Example: <code>BOT_TOKEN=123456:AAH...</code>)\n\n<i>You can also paste multiple lines at once!</i>",
+                reply_markup={"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"env_dash_{info['slug']}"}]]}
             )
         return
 
@@ -2006,30 +2038,144 @@ def detect_project_entry_script(project_dir):
     # Fallback to the first python file
     return project_py_files[0]
 
-def get_all_env_candidates(py_filename):
-    clean = py_filename.replace("scripts/", "").lstrip("/")
-    base_name = os.path.basename(clean)
+def resolve_env_target_info(target):
+    """
+    Universally resolves any target (project name, script name, entry path, or slug)
+    into its physical paths, primary .env file, entry point script, and vault key aliases.
+    """
+    if not target:
+        target = "bot.py"
+    clean = os.path.normpath(str(target).replace("scripts/", "").lstrip("/")).replace("\\", "/")
+    
+    # Check if target is a project directory in SCRIPTS_DIR
+    proj_dir = os.path.join(SCRIPTS_DIR, clean)
+    if os.path.isdir(proj_dir):
+        entry = detect_project_entry_script(proj_dir) or clean
+        base_name = os.path.basename(clean)
+        proj_name = clean
+        actual_dir = proj_dir
+    elif "/" in clean:
+        parts = clean.split("/")
+        proj_name = parts[0]
+        actual_dir = os.path.join(SCRIPTS_DIR, proj_name)
+        entry = clean
+        base_name = os.path.basename(clean)
+    else:
+        # Check if there is a directory matching slug or basename in SCRIPTS_DIR
+        found_dir = None
+        clean_clean = clean.replace("_", " ").lower()
+        for it in os.listdir(SCRIPTS_DIR) if os.path.exists(SCRIPTS_DIR) else []:
+            p = os.path.join(SCRIPTS_DIR, it)
+            it_clean = it.replace("_", " ").lower()
+            if os.path.isdir(p) and (it == clean or it.replace(" ", "_") == clean or it.lower() == clean.lower() or it_clean == clean_clean or clean_clean in it_clean or it_clean in clean_clean):
+                found_dir = p
+                proj_name = it
+                break
+        if found_dir:
+            actual_dir = found_dir
+            entry = detect_project_entry_script(found_dir) or clean
+            base_name = os.path.basename(entry)
+        else:
+            proj_name = clean
+            actual_dir = SCRIPTS_DIR
+            entry = clean
+            base_name = clean
+            
     if base_name.endswith(".py"):
-        base_name = base_name[:-3]
-    dir_name = os.path.dirname(clean)
+        base_stem = base_name[:-3]
+    else:
+        base_stem = base_name
+        
+    primary_dot_env = os.path.join(actual_dir, ".env")
+    secondary_env = os.path.join(actual_dir, f"{base_stem}.env")
     
-    candidates = []
-    # 1. Project subfolder .env if nested (Higher Priority)
-    if dir_name:
-        candidates.append(os.path.join(SCRIPTS_DIR, dir_name, f"{base_name}.env"))
-        candidates.append(os.path.join(SCRIPTS_DIR, dir_name, ".env"))
+    candidates = [
+        primary_dot_env,
+        secondary_env,
+        os.path.join(SCRIPTS_DIR, ".env"),
+        os.path.join(SCRIPTS_DIR, f"{base_stem}.env")
+    ]
+    unique_candidates = []
+    for c in candidates:
+        if c not in unique_candidates:
+            unique_candidates.append(c)
+            
+    vault_keys = [clean, entry, proj_name, base_name, f"scripts/{clean}", f"scripts/{entry}", f"scripts/{proj_name}"]
+    unique_vault_keys = []
+    for vk in vault_keys:
+        if vk and vk not in unique_vault_keys:
+            unique_vault_keys.append(vk)
+            
+    vault_save_keys = [entry, proj_name] if entry != proj_name else [entry]
+    is_project = (actual_dir != SCRIPTS_DIR)
     
-    # 2. Root scripts .env & dedicated env
-    candidates.append(os.path.join(SCRIPTS_DIR, f"{base_name}.env"))
-    candidates.append(os.path.join(SCRIPTS_DIR, ".env"))
-    return candidates
+    # Generate clean short slug (guaranteed <= 32 chars)
+    raw_slug = proj_name if is_project else entry
+    slug = raw_slug.replace(" ", "_").replace("/", "__")
+    if len(slug) > 32:
+        import hashlib
+        slug = slug[:24] + "_" + hashlib.md5(raw_slug.encode()).hexdigest()[:6]
+
+    return {
+        "type": "project" if is_project else "script",
+        "name": proj_name if is_project else entry,
+        "display_name": proj_name if is_project else entry,
+        "is_project": is_project,
+        "entry_script": entry,
+        "project_dir": actual_dir,
+        "primary_dot_env": primary_dot_env,
+        "secondary_env": secondary_env,
+        "env_file_candidates": unique_candidates,
+        "vault_keys": unique_vault_keys,
+        "vault_save_keys": vault_save_keys,
+        "slug": slug
+    }
+
+def get_manageable_targets():
+    """
+    Returns a clean, deduplicated list of top-level project folders
+    and standalone scripts in the workspace.
+    """
+    os.makedirs(SCRIPTS_DIR, exist_ok=True)
+    targets = []
+    seen_names = set()
+    active = get_active_running_processes()
+    
+    # 1. Project folders and top-level scripts in scripts/
+    top_items = sorted([f for f in os.listdir(SCRIPTS_DIR) if not f.startswith(".") and f != "__pycache__"])
+    for it in top_items:
+        p = os.path.join(SCRIPTS_DIR, it)
+        if os.path.isdir(p):
+            t_info = resolve_env_target_info(it)
+            if t_info["name"] not in seen_names:
+                seen_names.add(t_info["name"])
+                targets.append(t_info)
+        elif it.endswith(".py") and not it.startswith("_"):
+            t_info = resolve_env_target_info(it)
+            if t_info["name"] not in seen_names:
+                seen_names.add(t_info["name"])
+                targets.append(t_info)
+                
+    # 2. Also include any active running scripts or configured active scripts
+    all_active = list(active.keys()) + config.get("active_scripts", [])
+    for a in all_active:
+        t_info = resolve_env_target_info(a)
+        if t_info["name"] not in seen_names:
+            seen_names.add(t_info["name"])
+            targets.append(t_info)
+            
+    return targets
+
+def get_all_env_candidates(py_filename):
+    info = resolve_env_target_info(py_filename)
+    return info["env_file_candidates"]
 
 def get_script_env_path(py_filename):
-    candidates = get_all_env_candidates(py_filename)
-    for c in candidates:
+    info = resolve_env_target_info(py_filename)
+    for c in info["env_file_candidates"]:
         if os.path.exists(c):
             return c
-    return candidates[0] if candidates else os.path.join(SCRIPTS_DIR, ".env")
+    return info["primary_dot_env"]
 
 def get_vault_master_key():
     """Derives a 256-bit encryption key from the private TG_BOT_TOKEN secret."""
@@ -2055,28 +2201,37 @@ def encrypt_secret_data(plain_text: str) -> str:
     return base64.b64encode(payload).decode('utf-8')
 
 def decrypt_secret_data(enc_b64: str) -> str:
-    """Decrypts and verifies authentication tag using master key."""
+    """Decrypts and verifies authentication tag using master key, with graceful fallback."""
     import hashlib, hmac, base64
     try:
-        key = get_vault_master_key()
         raw = base64.b64decode(enc_b64.encode('utf-8'))
         if len(raw) < 48:
             return ""
         nonce = raw[:16]
         tag = raw[16:48]
         ciphertext = raw[48:]
-        expected_tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-        if not hmac.compare_digest(tag, expected_tag):
-            logger.error("Vault decryption failed: Authentication tag mismatch or secret key mismatch.")
-            return ""
-        keystream = bytearray()
-        counter = 0
-        while len(keystream) < len(ciphertext):
-            block = hashlib.sha256(key + nonce + counter.to_bytes(4, 'big')).digest()
-            keystream.extend(block)
-            counter += 1
-        decrypted_bytes = bytes(a ^ b for a, b in zip(ciphertext, keystream[:len(ciphertext)]))
-        return decrypted_bytes.decode('utf-8')
+        
+        # Test candidate keys: primary TG_BOT_TOKEN key first, then fallback salt
+        candidate_secrets = []
+        if TG_BOT_TOKEN:
+            candidate_secrets.append(TG_BOT_TOKEN)
+        candidate_secrets.append("fallback_vault_salt_saini920_private_cloud")
+        
+        for sec in candidate_secrets:
+            key = hashlib.sha256(sec.encode('utf-8')).digest()
+            expected_tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+            if hmac.compare_digest(tag, expected_tag):
+                keystream = bytearray()
+                counter = 0
+                while len(keystream) < len(ciphertext):
+                    block = hashlib.sha256(key + nonce + counter.to_bytes(4, 'big')).digest()
+                    keystream.extend(block)
+                    counter += 1
+                decrypted_bytes = bytes(a ^ b for a, b in zip(ciphertext, keystream[:len(ciphertext)]))
+                return decrypted_bytes.decode('utf-8')
+                
+        logger.debug("Vault decryption failed: Authentication tag mismatch or secret key mismatch.")
+        return ""
     except Exception as e:
         logger.error(f"Decryption error: {e}")
         return ""
@@ -2105,76 +2260,41 @@ def save_env_vault(vault):
         pass
 
 def restore_all_env_vaults_on_boot():
-    """Unpacks all encrypted environments locally on runner boot ONLY for existing scripts/projects."""
+    """Unpacks all encrypted environments locally on runner boot for all projects/scripts."""
     vault = load_env_vault()
-    keys_to_clean = []
-    for script_name, stored_enc in list(vault.items()):
+    if not isinstance(vault, dict) or not vault:
+        return
+        
+    for script_name, stored_enc in vault.items():
         if not stored_enc:
             continue
-        clean = script_name.replace("scripts/", "").lstrip("/").replace("\\", "/")
-        base_name = os.path.basename(clean)
-        dir_name = os.path.dirname(clean)
-        
-        # Check if the script or project directory actually exists on disk
-        script_file = os.path.join(SCRIPTS_DIR, clean)
-        project_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else None
-        
-        # If neither script file nor project directory exists, it is an orphaned deleted vault entry!
-        if not os.path.exists(script_file) and not (project_dir and os.path.exists(project_dir)):
-            keys_to_clean.append(script_name)
-            continue
-            
-        target_dir = project_dir if project_dir else SCRIPTS_DIR
-        decrypted_json_str = decrypt_secret_data(stored_enc)
-        if not decrypted_json_str:
-            continue
         try:
+            decrypted_json_str = decrypt_secret_data(stored_enc)
+            if not decrypted_json_str:
+                continue
             decrypted_dict = json.loads(decrypted_json_str)
-            dot_env = os.path.join(target_dir, ".env")
-            with open(dot_env, "w", encoding="utf-8") as f:
-                for k, v in sorted(decrypted_dict.items()):
-                    f.write(f"{k}={v}\n")
+            if not isinstance(decrypted_dict, dict) or not decrypted_dict:
+                continue
+                
+            info = resolve_env_target_info(script_name)
+            os.makedirs(os.path.dirname(info["primary_dot_env"]), exist_ok=True)
+            content = "\n".join([f"{k}={v}" for k, v in sorted(decrypted_dict.items())]) + "\n"
+            with open(info["primary_dot_env"], "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info(f"Restored .env on boot for {info['display_name']} -> {info['primary_dot_env']}")
         except Exception as e:
             logger.error(f"Error unpacking vault on boot for {script_name}: {e}")
-            
-    # Purge orphaned keys from vault
-    if keys_to_clean:
-        for k in keys_to_clean:
-            vault.pop(k, None)
-        save_env_vault(vault)
 
 def read_script_env(py_filename):
-    """Reads environment variables from encrypted vault first (source of truth), then local .env."""
-    clean = py_filename.replace("scripts/", "").lstrip("/").replace("\\", "/")
-    base_name = os.path.basename(clean)
-    if base_name.endswith(".py"):
-        base_name = base_name[:-3]
-    dir_name = os.path.dirname(clean)
-    target_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else SCRIPTS_DIR
-    
-    # 1. First priority: check Encrypted Vault (Source of truth)
-    vault = load_env_vault()
-    stored_enc = vault.get(clean) or vault.get(f"{clean}.py") or vault.get(base_name) or vault.get(f"scripts/{clean}")
-    if stored_enc:
-        decrypted_json_str = decrypt_secret_data(stored_enc)
-        if decrypted_json_str:
-            try:
-                decrypted_dict = json.loads(decrypted_json_str)
-                if decrypted_dict:
-                    # Sync to local physical .env file so python scripts and python-dotenv read it directly
-                    os.makedirs(target_dir, exist_ok=True)
-                    dot_env = os.path.join(target_dir, ".env")
-                    with open(dot_env, "w", encoding="utf-8") as f:
-                        for k, v in sorted(decrypted_dict.items()):
-                            f.write(f"{k}={v}\n")
-                    return decrypted_dict
-            except Exception as e:
-                logger.error(f"Error parsing decrypted vault for {clean}: {e}")
-
-    # 2. Fallback: local .env files
+    """
+    Reads environment variables for a project/script from physical .env files
+    and the Encrypted Vault, keeping them synchronized and up-to-date.
+    """
+    info = resolve_env_target_info(py_filename)
     merged_env = {}
-    candidates = get_all_env_candidates(py_filename)
-    for c in reversed(candidates):
+    
+    # 1. Read from physical .env files on disk first
+    for c in reversed(info["env_file_candidates"]):
         if os.path.exists(c):
             try:
                 with open(c, "r", encoding="utf-8", errors="ignore") as f:
@@ -2188,42 +2308,336 @@ def read_script_env(py_filename):
                             v = v.strip().strip("'\"")
                             if k:
                                 merged_env[k] = v
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error reading local .env file {c}: {e}")
+
+    # 2. Check Encrypted Vault (Source of truth across cloud instances)
+    vault = load_env_vault()
+    stored_enc = None
+    for vk in info["vault_keys"]:
+        if vk in vault and vault[vk]:
+            stored_enc = vault[vk]
+            break
+            
+    if stored_enc:
+        decrypted_json_str = decrypt_secret_data(stored_enc)
+        if decrypted_json_str:
+            try:
+                decrypted_dict = json.loads(decrypted_json_str)
+                if isinstance(decrypted_dict, dict) and decrypted_dict:
+                    merged_env.update(decrypted_dict)
+            except Exception as e:
+                logger.error(f"Error parsing decrypted vault for {info['name']}: {e}")
+
+    # 3. Always ensure physical .env in project directory exists and is updated!
+    if merged_env and info["primary_dot_env"]:
+        try:
+            os.makedirs(os.path.dirname(info["primary_dot_env"]), exist_ok=True)
+            content = "\n".join([f"{k}={v}" for k, v in sorted(merged_env.items())]) + "\n"
+            needs_write = True
+            if os.path.exists(info["primary_dot_env"]):
+                try:
+                    with open(info["primary_dot_env"], "r", encoding="utf-8", errors="ignore") as cur_f:
+                        if cur_f.read() == content:
+                            needs_write = False
+                except Exception:
+                    pass
+            if needs_write:
+                with open(info["primary_dot_env"], "w", encoding="utf-8") as f:
+                    f.write(content)
+        except Exception as e:
+            logger.error(f"Error updating local .env for {info['name']}: {e}")
+
     return merged_env
 
 def write_script_env(py_filename, env_dict):
-    """Writes environment variables to local .env and saves AES-grade encrypted vault."""
-    clean = py_filename.replace("scripts/", "").lstrip("/")
-    base_name = os.path.basename(clean)
-    if base_name.endswith(".py"):
-        base_name = base_name[:-3]
-    dir_name = os.path.dirname(clean)
-    
-    target_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else SCRIPTS_DIR
-    os.makedirs(target_dir, exist_ok=True)
-    
-    primary_env = os.path.join(target_dir, f"{base_name}.env")
-    dot_env = os.path.join(target_dir, ".env")
-    
+    """
+    Writes environment variables to the project's local .env file,
+    encrypts into the cloud vault, and syncs asynchronously to GitHub.
+    """
+    info = resolve_env_target_info(py_filename)
     try:
         content = "\n".join([f"{k}={v}" for k, v in sorted(env_dict.items())]) + "\n"
-        with open(primary_env, "w", encoding="utf-8") as f:
-            f.write(content)
-        with open(dot_env, "w", encoding="utf-8") as f:
+        
+        # 1. Write to physical .env in the project directory
+        os.makedirs(os.path.dirname(info["primary_dot_env"]), exist_ok=True)
+        with open(info["primary_dot_env"], "w", encoding="utf-8") as f:
             f.write(content)
             
-        # Encrypt the entire dictionary with AES/HMAC before saving to public repo vault!
+        # 2. Also write to secondary <stem>.env if distinct
+        if info["secondary_env"] and info["secondary_env"] != info["primary_dot_env"]:
+            try:
+                with open(info["secondary_env"], "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception:
+                pass
+                
+        # 3. Encrypt and save to vault under all alias keys
         vault = load_env_vault()
         json_str = json.dumps(env_dict)
         encrypted_ciphertext = encrypt_secret_data(json_str)
-        vault[clean] = encrypted_ciphertext
+        for vk in info["vault_save_keys"]:
+            vault[vk] = encrypted_ciphertext
         save_env_vault(vault)
-            
-        git_sync_to_github(f"Update encrypted vault for {base_name}")
+        
+        # 4. Asynchronously sync to GitHub in background (NEVER block Telegram polling!)
+        commit_desc = f"Update encrypted vault for {info['display_name']}"
+        threading.Thread(target=git_sync_to_github, args=(commit_desc,), daemon=True).start()
+        
         return True, "Env saved successfully."
     except Exception as e:
+        logger.error(f"write_script_env error: {e}")
         return False, f"Error saving env: {e}"
+
+def purge_project_or_script_completely(target_name):
+    """
+    Completely and permanently deletes a project or standalone script everywhere:
+    1. Immediately terminates running child processes matching this project or script.
+    2. Wipes all files, subdirectories, and hidden files (.env, .git, etc.) from disk.
+    3. Purges all candidate .env files across scripts/ and root workspace.
+    4. Clears all associated keys from .env_vault.json and config['env_vault'].
+    5. Cleans all references from config['active_scripts'], config['manually_stopped_scripts'], etc.
+    6. Removes isolated virtualenvs (.venvs/).
+    7. Cleans all databases, sessions, logs, temporary/staging archives.
+    8. Stages complete removal from Git index and triggers background push to GitHub.
+    """
+    import shutil, signal, re
+    
+    clean_target = os.path.normpath(str(target_name).replace("scripts/", "").lstrip("/")).replace("\\", "/")
+    info = resolve_env_target_info(clean_target)
+    
+    proj_dir = info["project_dir"]
+    is_project = info["is_project"] or (proj_dir != SCRIPTS_DIR and os.path.isdir(proj_dir))
+    proj_name = info["name"]
+    slug = info["slug"]
+    entry_script = info["entry_script"]
+    base_stem = proj_name.rsplit(".", 1)[0]
+    
+    # 1. Real-time Process Termination
+    stop_child_app(script_name=clean_target, clear_active=True)
+    stop_child_app(script_name=proj_name, clear_active=True)
+    if entry_script:
+        stop_child_app(script_name=entry_script, clear_active=True)
+    if slug != proj_name:
+        stop_child_app(script_name=slug, clear_active=True)
+        
+    proj_abs_path = os.path.realpath(proj_dir) if (is_project and os.path.exists(proj_dir)) else ""
+    for k, pdata in list(running_processes.items()):
+        k_norm = os.path.normpath(k).replace("\\", "/")
+        k_real = pdata.get("script_real_path") or os.path.realpath(os.path.join(SCRIPTS_DIR, k_norm))
+        proc = pdata.get("proc")
+        pid = pdata.get("pid")
+        
+        matches = (
+            k_norm == clean_target
+            or k_norm == proj_name
+            or k_norm == entry_script
+            or k_norm == slug
+            or k_norm.startswith(f"{proj_name}/")
+            or k_norm.startswith(f"{clean_target}/")
+            or os.path.dirname(k_norm) == proj_name
+            or (is_project and proj_abs_path and (k_real == proj_abs_path or k_real.startswith(proj_abs_path + os.sep)))
+        )
+        if matches:
+            if proc and hasattr(proc, "pid") and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+            running_processes.pop(k, None)
+            
+    # 2. Disk Cleanup: Project Directory or Single File
+    if is_project and proj_dir not in [SCRIPTS_DIR, WORKSPACE_DIR] and os.path.exists(proj_dir):
+        try:
+            shutil.rmtree(proj_dir, ignore_errors=True)
+        except Exception as e:
+            logger.error(f"Error removing proj_dir {proj_dir}: {e}")
+        if os.path.exists(proj_dir):
+            subprocess.run(["rm", "-rf", proj_dir], capture_output=True)
+            
+    # Standalone single file
+    single_script_path = os.path.join(SCRIPTS_DIR, clean_target)
+    if os.path.exists(single_script_path):
+        try:
+            if os.path.isdir(single_script_path) and single_script_path not in [SCRIPTS_DIR, WORKSPACE_DIR]:
+                shutil.rmtree(single_script_path, ignore_errors=True)
+            else:
+                os.remove(single_script_path)
+        except Exception as e:
+            logger.error(f"Error removing single script {single_script_path}: {e}")
+
+    # Check root workspace mirror if exists
+    ws_mirror = os.path.join(WORKSPACE_DIR, proj_name)
+    if os.path.exists(ws_mirror) and ws_mirror not in [WORKSPACE_DIR, SCRIPTS_DIR]:
+        try:
+            if os.path.isdir(ws_mirror):
+                shutil.rmtree(ws_mirror, ignore_errors=True)
+            else:
+                os.remove(ws_mirror)
+        except Exception:
+            pass
+
+    # 3. Dedicated Removal of ALL Candidate and Associated .env Files
+    all_env_paths = list(info.get("env_file_candidates", [])) + [
+        info["primary_dot_env"],
+        info["secondary_env"],
+        os.path.join(SCRIPTS_DIR, f"{proj_name}.env"),
+        os.path.join(SCRIPTS_DIR, f"{clean_target}.env"),
+        os.path.join(SCRIPTS_DIR, f"{base_stem}.env"),
+        os.path.join(SCRIPTS_DIR, f"{slug}.env"),
+        os.path.join(WORKSPACE_DIR, f"{proj_name}.env"),
+        os.path.join(WORKSPACE_DIR, f"{clean_target}.env"),
+        os.path.join(WORKSPACE_DIR, f"{base_stem}.env"),
+        os.path.join(WORKSPACE_DIR, f"{slug}.env"),
+    ]
+    for ef in set(all_env_paths):
+        if ef and os.path.exists(ef):
+            try:
+                os.remove(ef)
+            except Exception as e:
+                logger.error(f"Error deleting .env file {ef}: {e}")
+
+    # 4. Remove Requirements, Logs, Temp Archives, Databases, and Sessions
+    companion_files = [
+        os.path.join(SCRIPTS_DIR, f"{proj_name}.requirements.txt"),
+        os.path.join(SCRIPTS_DIR, f"{clean_target}.requirements.txt"),
+        os.path.join(SCRIPTS_DIR, f"{base_stem}.requirements.txt"),
+        os.path.join(SCRIPTS_DIR, f"{proj_name}.log"),
+        os.path.join(SCRIPTS_DIR, f"{clean_target}.log"),
+        os.path.join(SCRIPTS_DIR, f"{base_stem}.log"),
+        os.path.join(WORKSPACE_DIR, f"temp_{proj_name}.zip"),
+        os.path.join(WORKSPACE_DIR, f"temp_{clean_target}.zip"),
+        os.path.join(WORKSPACE_DIR, f"temp_{base_stem}.zip"),
+        os.path.join(WORKSPACE_DIR, f"temp_{slug}.zip"),
+    ]
+    for cf in companion_files:
+        if os.path.exists(cf):
+            try:
+                os.remove(cf)
+            except Exception:
+                pass
+
+    # Clean residual databases, sqlite, session, journal, wal files
+    search_keys = [proj_name.lower(), clean_target.lower(), base_stem.lower(), slug.lower()]
+    db_exts = {".db", ".sqlite", ".sqlite3", ".session", ".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"}
+    for search_root in [SCRIPTS_DIR, WORKSPACE_DIR]:
+        if not os.path.exists(search_root):
+            continue
+        try:
+            for it in os.listdir(search_root):
+                it_path = os.path.join(search_root, it)
+                if it.startswith(".staging_") and any(k in it.lower() for k in search_keys if len(k) >= 3):
+                    try:
+                        if os.path.isdir(it_path): shutil.rmtree(it_path, ignore_errors=True)
+                        else: os.remove(it_path)
+                    except Exception: pass
+                elif os.path.isfile(it_path):
+                    it_lower = it.lower()
+                    ext = os.path.splitext(it_lower)[1]
+                    if ext in db_exts and any(k in it_lower for k in search_keys if len(k) >= 3):
+                        try: os.remove(it_path)
+                        except Exception: pass
+        except Exception:
+            pass
+
+    # 5. Remove Isolated Virtualenvs
+    venv_slugs = set([
+        re.sub(r'[^a-zA-Z0-9_\-\.]', '_', proj_name),
+        re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_target),
+        re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_stem),
+        re.sub(r'[^a-zA-Z0-9_\-\.]', '_', slug),
+        proj_name,
+        slug
+    ])
+    for v_name in venv_slugs:
+        v_dir = os.path.join(VENVS_DIR, v_name)
+        if os.path.exists(v_dir):
+            try:
+                shutil.rmtree(v_dir, ignore_errors=True)
+                if os.path.exists(v_dir):
+                    subprocess.run(["rm", "-rf", v_dir], capture_output=True)
+            except Exception:
+                pass
+
+    # 6. Real-time Vault & Config Purge
+    vault = load_env_vault()
+    keys_to_purge = set(info.get("vault_keys", []) + info.get("vault_save_keys", []))
+    for vk in list(vault.keys()):
+        vk_lower = vk.lower()
+        if (
+            vk in keys_to_purge
+            or vk == proj_name
+            or vk == clean_target
+            or vk == slug
+            or vk == base_stem
+            or vk.startswith(f"{proj_name}/")
+            or vk.startswith(f"{clean_target}/")
+            or vk.startswith(f"scripts/{proj_name}/")
+            or vk.startswith(f"scripts/{clean_target}/")
+            or os.path.dirname(vk) == proj_name
+            or os.path.basename(vk) in [proj_name, base_stem, slug]
+            or vk_lower == proj_name.lower()
+            or vk_lower.startswith(f"{proj_name.lower()}/")
+        ):
+            vault.pop(vk, None)
+    save_env_vault(vault)
+    config["env_vault"] = vault
+
+    def is_match_config(s):
+        s_norm = os.path.normpath(str(s)).replace("\\", "/")
+        return (
+            s_norm == clean_target
+            or s_norm == proj_name
+            or s_norm == entry_script
+            or s_norm == slug
+            or s_norm.startswith(f"{proj_name}/")
+            or s_norm.startswith(f"{clean_target}/")
+            or os.path.dirname(s_norm) == proj_name
+            or os.path.basename(s_norm) in [proj_name, base_stem]
+        )
+
+    config["active_scripts"] = [s for s in list(config.get("active_scripts", [])) if not is_match_config(s)]
+    config["manually_stopped_scripts"] = [s for s in list(config.get("manually_stopped_scripts", [])) if not is_match_config(s)]
+    if config.get("active_script") and is_match_config(config["active_script"]):
+        config["active_script"] = None
+    if config.get("auto_run_file") and is_match_config(config["auto_run_file"]):
+        config["auto_run_file"] = None
+    if "script_envs" in config and isinstance(config["script_envs"], dict):
+        for k in list(config["script_envs"].keys()):
+            if is_match_config(k):
+                config["script_envs"].pop(k, None)
+    save_config(config)
+
+    # 7. Git Index Removal
+    git_targets = [
+        f"scripts/{proj_name}",
+        f"scripts/{clean_target}",
+        f"scripts/{entry_script}",
+        f"scripts/{base_stem}",
+        f"scripts/{proj_name}.requirements.txt",
+        f"scripts/{clean_target}.requirements.txt",
+        proj_name,
+        clean_target,
+    ]
+    for gt in set(git_targets):
+        if gt:
+            try:
+                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", gt], cwd=WORKSPACE_DIR, capture_output=True)
+            except Exception:
+                pass
+
+    # 8. Async Git Sync in Background
+    commit_msg = f"Permanently delete {info['display_name']} and all associated files"
+    threading.Thread(target=git_sync_to_github, args=(commit_msg,), daemon=True).start()
+
+    logger.info(f"Purged project/script {info['display_name']} completely everywhere.")
+    return True, info
 
 def mask_secret_val(val):
     if not val:
@@ -2234,46 +2648,34 @@ def mask_secret_val(val):
 
 def prompt_env_script_select(chat_id, user_id, message_id=None):
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
-    
-    # Scan all Python files recursively across scripts/ and projects
-    all_files = []
-    for root, _, fs in os.walk(SCRIPTS_DIR):
-        for f in fs:
-            if f.endswith(".py") and not f.startswith("."):
-                rel = os.path.relpath(os.path.join(root, f), SCRIPTS_DIR).replace("\\", "/")
-                all_files.append(rel)
-    all_files.sort()
-    
-    files = [f for f in all_files if is_runnable_entry_point(f)]
-    if not files and all_files:
-        files = all_files
-
+    targets = get_manageable_targets()
     vault = load_env_vault()
     buttons = []
-    if not files:
+    
+    if not targets:
         text = (
-            "⚙️ <b>Per-Script Environment (.env) Manager</b>\n"
+            "⚙️ <b>Per-Project / Script Environment (.env) Manager</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📁 No Python scripts found in <code>scripts/</code> folder.\n\n"
+            "📁 No projects or scripts found in <code>scripts/</code> folder.\n\n"
             "💡 <i>Send a new script (.py) or ZIP project in chat to add one.</i>"
         )
     else:
         text = (
-            "⚙️ <b>Per-Script Environment (.env) Manager</b>\n"
+            "⚙️ <b>Per-Project / Script Environment (.env) Manager</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Each script/project has its own private <b><code>.env</code></b> vault loaded on launch.\n\n"
-            "<i>Select a script to configure, or tap 🗑️ Delete to clear its environment:</i>"
+            "Each bot project has its own private <b><code>.env</code></b> vault loaded on launch.\n\n"
+            "<i>Select a project below to view and configure its environment variables:</i>"
         )
-        for py in files:
-            env_vars = read_script_env(py)
+        for t in targets:
+            env_vars = read_script_env(t["name"])
             count = len(env_vars)
             badge = f"({count} vars)" if count > 0 else "(0 vars)"
-            cfg_btn = {"text": f"📁 {py} {badge}", "callback_data": f"env_dash_{py}"}
-            del_btn = {"text": "🗑️ Delete", "callback_data": f"env_wipe_one_{py}"}
+            icon = "📦" if t["is_project"] else "📄"
+            cfg_btn = {"text": f"{icon} {t['display_name']} {badge}", "callback_data": f"env_dash_{t['slug']}"}
+            del_btn = {"text": "🗑️ Wipe", "callback_data": f"env_wipe_{t['slug']}"}
             buttons.append([cfg_btn, del_btn])
     
-    # Delete All ENVs button across entire workspace
-    if files or (vault and len(vault) > 0):
+    if targets or (vault and len(vault) > 0):
         buttons.append([{"text": "💣 Delete All (.env) Variables", "callback_data": "env_wipe_all_prompt"}])
         
     buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
@@ -2284,22 +2686,35 @@ def prompt_env_script_select(chat_id, user_id, message_id=None):
         send_tg_message(chat_id, text, reply_markup=markup)
 
 def prompt_script_env_dashboard(chat_id, user_id, py_filename, message_id=None):
-    env_vars = read_script_env(py_filename)
+    info = resolve_env_target_info(py_filename)
+    env_vars = read_script_env(info["name"])
     active = get_active_running_processes()
-    is_this_running = py_filename in active
     
+    is_this_running = (
+        info["entry_script"] in active or
+        info["name"] in active or
+        any(k.startswith(f"{info['name']}/") or k == info['name'] for k in active.keys())
+    )
+    running_key = next((k for k in active.keys() if k == info["entry_script"] or k == info["name"] or k.startswith(f"{info['name']}/")), info["entry_script"]) if is_this_running else info["entry_script"]
+
     var_lines = []
     if not env_vars:
         var_lines.append("<i>No environment variables configured yet.</i>")
     else:
-        for k, v in sorted(env_vars.items()):
+        for k, v in sorted(env_vars.items())[:35]:
             masked = mask_secret_val(v)
             var_lines.append(f"• 🔑 <code>{k}</code> = <code>{masked}</code>")
+        if len(env_vars) > 35:
+            var_lines.append(f"<i>...and {len(env_vars) - 35} more variables</i>")
+            
+    rel_dot_env = os.path.relpath(info["primary_dot_env"], WORKSPACE_DIR)
+    status_badge = "🟢 <b>Running</b>" if is_this_running else "🔴 <b>Stopped</b>"
     
-    base_name = py_filename.rsplit('.', 1)[0]
     text = (
-        f"⚙️ <b>Private Environment:</b> <code>scripts/{py_filename}</code>\n"
-        f"📁 <b>Dedicated Config:</b> <code>scripts/{base_name}.env</code>\n"
+        f"⚙️ <b>Environment Manager:</b> <code>{info['display_name']}</code>\n"
+        f"🎯 <b>Entry Script:</b> <code>scripts/{info['entry_script']}</code>\n"
+        f"📁 <b>Physical File:</b> <code>{rel_dot_env}</code>\n"
+        f"⚡ <b>Status:</b> {status_badge}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(var_lines)
         + "\n\n<i>Use the buttons below to manage, add, or delete variables:</i>"
@@ -2307,23 +2722,23 @@ def prompt_script_env_dashboard(chat_id, user_id, py_filename, message_id=None):
     
     buttons = [
         [
-            {"text": "➕ Add / Edit Variable", "callback_data": f"env_add_{py_filename}"},
-            {"text": "🗑️ Delete Variable", "callback_data": f"env_del_list_{py_filename}"}
+            {"text": "➕ Add / Edit Variable", "callback_data": f"env_add_{info['slug']}"},
+            {"text": "🗑️ Delete Variable", "callback_data": f"env_del_{info['slug']}"}
         ],
         [
-            {"text": "💣 Delete All Variables (.env)", "callback_data": f"env_wipe_one_{py_filename}"},
-            {"text": f"📥 Export {os.path.basename(base_name)}.env", "callback_data": f"env_exp_{py_filename}"}
+            {"text": "💣 Wipe All ENVs", "callback_data": f"env_wipe_{info['slug']}"},
+            {"text": "📥 Export .env", "callback_data": f"env_exp_{info['slug']}"}
         ],
         [
-            {"text": "🛡️ View Venv Packages", "callback_data": f"venv_list_{py_filename}"}
+            {"text": "🛡️ View Venv Packages", "callback_data": f"venv_list_{info['entry_script']}"}
         ]
     ]
     if is_this_running:
-        buttons.append([{"text": "🔄 Apply & Restart Script", "callback_data": f"exec_run_{py_filename}"}])
+        buttons.append([{"text": "🔄 Apply & Restart Script", "callback_data": f"exec_run_{running_key}"}])
     else:
-        buttons.append([{"text": f"▶️ Run {py_filename} Now", "callback_data": f"exec_run_{py_filename}"}])
-    
-    buttons.append([{"text": "🔙 Back to Scripts", "callback_data": "menu_env_select"}])
+        buttons.append([{"text": f"▶️ Run {info['display_name']} Now", "callback_data": f"exec_run_{info['entry_script']}"}])
+        
+    buttons.append([{"text": "🔙 Back to Script ENVs", "callback_data": "menu_env_select"}])
     markup = {"inline_keyboard": buttons}
     
     if message_id:
@@ -2332,17 +2747,28 @@ def prompt_script_env_dashboard(chat_id, user_id, py_filename, message_id=None):
         send_tg_message(chat_id, text, reply_markup=markup)
 
 def prompt_env_delete_list(chat_id, user_id, py_filename, message_id=None):
-    env_vars = read_script_env(py_filename)
+    info = resolve_env_target_info(py_filename)
+    env_vars = read_script_env(info["name"])
     if not env_vars:
-        text = f"ℹ️ No variables to delete for <code>{py_filename}</code>."
-        markup = {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"env_dash_{py_filename}"}]]}
+        text = f"ℹ️ No variables to delete for <code>{info['display_name']}</code>."
+        markup = {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"env_dash_{info['slug']}"}]]}
     else:
-        text = f"🗑️ <b>Delete Variable from <code>{py_filename}</code>:</b>\n\nTap a variable below to remove it:"
+        sorted_keys = sorted(env_vars.keys())
+        user_states[user_id] = {
+            "action": "DELETING_ENV_VAR",
+            "target": info["name"],
+            "slug": info["slug"],
+            "keys": sorted_keys
+        }
+        text = (
+            f"🗑️ <b>Delete Variable from <code>{info['display_name']}</code>:</b>\n\n"
+            "Tap a variable below to remove it:"
+        )
         buttons = []
-        for k in sorted(env_vars.keys()):
-            buttons.append([{"text": f"❌ Delete {k}", "callback_data": f"env_dodel_{py_filename}:::{k}"}])
-        buttons.append([{"text": "💣 Delete All Variables", "callback_data": f"env_wipe_one_{py_filename}"}])
-        buttons.append([{"text": "🔙 Back", "callback_data": f"env_dash_{py_filename}"}])
+        for idx, k in enumerate(sorted_keys[:40]):
+            buttons.append([{"text": f"❌ Delete {k}", "callback_data": f"env_dv_{idx}"}])
+        buttons.append([{"text": "💣 Wipe All Variables", "callback_data": f"env_wipe_{info['slug']}"}])
+        buttons.append([{"text": "🔙 Back", "callback_data": f"env_dash_{info['slug']}"}])
         markup = {"inline_keyboard": buttons}
     
     if message_id:
@@ -2421,7 +2847,8 @@ def prompt_runner_menu(chat_id, user_id, message_id=None):
             else:
                 run_btn = {"text": f"▶️ Run {py}{badge_str}", "callback_data": f"exec_run_{py}"}
             
-            del_btn = {"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{py}"}
+            py_info = resolve_env_target_info(py)
+            del_btn = {"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{py_info['slug']}"}
             buttons.append([run_btn, del_btn])
 
     buttons.append([{"text": "📤 Upload New Script / ZIP", "callback_data": "menu_upload_prompt"}])
@@ -2656,8 +3083,11 @@ def show_files_view(chat_id, message_id=None):
                 entry_script = detect_project_entry_script(p)
                 entry_base = os.path.basename(entry_script) if entry_script else ""
                 
+                t_info = resolve_env_target_info(it)
+                env_vars_count = len(read_script_env(it))
+                env_badge = f" <i>(🔒 {env_vars_count} ENVs)</i>" if env_vars_count > 0 else " <i>(⚠️ No ENV)</i>"
                 human_sz = format_bytes_human(total_size)
-                file_lines.append(f"• {status_icon} <b>{it}/</b> (<code>{len(inner_files)} files</code> | <code>{human_sz}</code>){' <b>[RUNNING]</b>' if is_this_running else ''}")
+                file_lines.append(f"• {status_icon} <b>{it}/</b> (<code>{len(inner_files)} files</code> | <code>{human_sz}</code>){env_badge}{' <b>[RUNNING]</b>' if is_this_running else ''}")
                 
                 # Show inner python scripts inside this project
                 for rel_py, py_name, py_sz in inner_py_files[:4]:
@@ -2668,12 +3098,13 @@ def show_files_view(chat_id, message_id=None):
                     file_lines.append(f"   └ <i>...and {len(inner_py_files) - 4} more files</i>")
                     
                 # Action buttons for this project
-                row_btns = [{"text": f"📦 {it}.zip", "callback_data": f"file_dl_{it}"}]
+                row_btns = [{"text": f"📦 {it}.zip", "callback_data": f"file_dl_{t_info['slug']}"}]
                 if is_this_running and running_script_name:
-                    row_btns.append({"text": f"🛑 Stop {entry_base or it}", "callback_data": f"confirm_stop_prompt_{running_script_name}"})
+                    row_btns.append({"text": f"🛑 Stop", "callback_data": f"confirm_stop_prompt_{running_script_name}"})
                 elif entry_script:
-                    row_btns.append({"text": f"▶️ Run {entry_base}", "callback_data": f"exec_run_{entry_script}"})
-                row_btns.append({"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{it}"})
+                    row_btns.append({"text": f"▶️ Run", "callback_data": f"exec_run_{entry_script}"})
+                row_btns.append({"text": f"⚙️ ENV ({env_vars_count})", "callback_data": f"env_dash_{t_info['slug']}"})
+                row_btns.append({"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{t_info['slug']}"})
                 download_buttons.append(row_btns)
                 
             elif os.path.isfile(p):
@@ -2681,31 +3112,33 @@ def show_files_view(chat_id, message_id=None):
                 is_this_running = it in active
                 status_icon = "🟢" if is_this_running else "📄"
                 human_sz = format_bytes_human(sz)
+                t_info = resolve_env_target_info(it)
                 
                 if it.endswith(".py"):
                     req_p = get_script_req_path(it)
-                    has_env = len(read_script_env(it)) > 0
+                    env_vars_count = len(read_script_env(it))
                     badges = []
                     if req_p:
                         badges.append("📦 Req")
-                    if has_env:
-                        badges.append("🔒 Env")
+                    if env_vars_count > 0:
+                        badges.append(f"🔒 {env_vars_count} Env")
                     badge_str = f" <i>({' | '.join(badges)})</i>" if badges else ""
                     
                     file_lines.append(f"• {status_icon} <code>{it}</code> ({human_sz}){badge_str}{' <b>[RUNNING]</b>' if is_this_running else ''}")
                     
-                    row_btns = [{"text": f"📥 {it}", "callback_data": f"file_dl_{it}"}]
+                    row_btns = [{"text": f"📥 {it}", "callback_data": f"file_dl_{t_info['slug']}"}]
                     if is_this_running:
                         row_btns.append({"text": "🛑 Stop", "callback_data": f"confirm_stop_prompt_{it}"})
                     else:
                         row_btns.append({"text": "▶️ Run", "callback_data": f"exec_run_{it}"})
-                    row_btns.append({"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{it}"})
+                    row_btns.append({"text": f"⚙️ ENV ({env_vars_count})", "callback_data": f"env_dash_{t_info['slug']}"})
+                    row_btns.append({"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{t_info['slug']}"})
                     download_buttons.append(row_btns)
                 else:
                     file_lines.append(f"• 📄 <code>{it}</code> ({human_sz})")
                     download_buttons.append([
-                        {"text": f"📥 {it}", "callback_data": f"file_dl_{it}"},
-                        {"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{it}"}
+                        {"text": f"📥 {it}", "callback_data": f"file_dl_{t_info['slug']}"},
+                        {"text": "🗑️ Delete", "callback_data": f"confirm_del_file_{t_info['slug']}"}
                     ])
                     
     text = (
@@ -3255,35 +3688,62 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
     # 2c. Specific Script ENV Dashboard
     elif data.startswith("env_dash_"):
         fname = data.replace("env_dash_", "")
+        info = resolve_env_target_info(fname)
         answer_callback(callback_id)
-        prompt_script_env_dashboard(chat_id, user_id, fname, message_id)
+        prompt_script_env_dashboard(chat_id, user_id, info["name"], message_id)
 
     # 2d. Add/Edit Variable Prompt
     elif data.startswith("env_add_"):
         fname = data.replace("env_add_", "")
+        info = resolve_env_target_info(fname)
         user_states[user_id] = {
             "action": "WAITING_ENV_VAR",
-            "target_py": fname
+            "target_py": info["name"]
         }
         answer_callback(callback_id)
         text = (
-            f"⚙️ <b>Set Environment Variable for <code>{fname}</code></b>\n"
+            f"⚙️ <b>Set Environment Variable for <code>{info['display_name']}</code></b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Please send the variable name and value in chat:\n\n"
             "• <b>Format:</b> <code>KEY=VALUE</code>\n"
-            "• <b>Example:</b> <code>BOT_TOKEN=123456789:AAH...</code>\n"
-            "• <b>Example:</b> <code>GMAIL_EMAIL=mybot@gmail.com</code>\n\n"
-            "<i>Saved into dedicated <code>scripts/{fname.rsplit('.', 1)[0]}.env</code>.</i>"
+            "• <b>Multiple lines supported!</b> You can paste multiple variables or an entire <code>.env</code> file.\n"
+            "• <b>Example:</b>\n"
+            "<code>BOT_TOKEN=123456789:AAH...\n"
+            "API_ID=123456\n"
+            "API_HASH=abcdef0123456789</code>\n\n"
+            f"<i>Saved to <code>{os.path.relpath(info['primary_dot_env'], WORKSPACE_DIR)}</code> and encrypted to Cloud!</i>"
         )
-        edit_tg_message(chat_id, message_id, text, reply_markup={"inline_keyboard": [[{"text": "❌ Cancel", "callback_data": f"env_dash_{fname}"}]]})
+        edit_tg_message(chat_id, message_id, text, reply_markup={"inline_keyboard": [[{"text": "❌ Cancel", "callback_data": f"env_dash_{info['slug']}"}]]})
 
     # 2e. Delete Variable Menu
-    elif data.startswith("env_del_list_"):
-        fname = data.replace("env_del_list_", "")
+    elif data.startswith("env_del_list_") or data.startswith("env_del_"):
+        fname = data.replace("env_del_list_", "").replace("env_del_", "")
+        info = resolve_env_target_info(fname)
         answer_callback(callback_id)
-        prompt_env_delete_list(chat_id, user_id, fname, message_id)
+        prompt_env_delete_list(chat_id, user_id, info["name"], message_id)
 
-    # 2f. Do Delete Variable
+    # 2f. Do Delete Variable (Index-based)
+    elif data.startswith("env_dv_"):
+        idx_str = data.replace("env_dv_", "")
+        state = user_states.get(user_id, {})
+        target = state.get("target")
+        keys = state.get("keys", [])
+        try:
+            idx = int(idx_str)
+            if 0 <= idx < len(keys):
+                var_key = keys[idx]
+                env_dict = read_script_env(target)
+                env_dict.pop(var_key, None)
+                write_script_env(target, env_dict)
+                answer_callback(callback_id, f"🗑️ {var_key} deleted!", show_alert=True)
+                prompt_script_env_dashboard(chat_id, user_id, target, message_id)
+            else:
+                answer_callback(callback_id, "Variable not found.", show_alert=True)
+        except Exception as e:
+            logger.error(f"env_dv error: {e}")
+            answer_callback(callback_id, "Error deleting variable.", show_alert=True)
+
+    # 2f1. Do Delete Variable (Legacy format compatibility)
     elif data.startswith("env_dodel_"):
         raw = data.replace("env_dodel_", "")
         if ":::" in raw:
@@ -3293,36 +3753,27 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             fname, var_key = (parts[0], parts[1]) if len(parts) == 2 else ("", "")
             
         if fname and var_key:
-            env_dict = read_script_env(fname)
+            info = resolve_env_target_info(fname)
+            env_dict = read_script_env(info["name"])
             env_dict.pop(var_key, None)
-            write_script_env(fname, env_dict)
+            write_script_env(info["name"], env_dict)
             answer_callback(callback_id, f"🗑️ {var_key} deleted in real-time!", show_alert=True)
-            prompt_script_env_dashboard(chat_id, user_id, fname, message_id)
+            prompt_script_env_dashboard(chat_id, user_id, info["name"], message_id)
 
-    # 2f2. Wipe Single Script's Environment Variables
-    elif data.startswith("env_wipe_one_"):
-        fname = data.replace("env_wipe_one_", "")
-        answer_callback(callback_id, f"Wiping environment for {fname}...")
+    # 2f2. Wipe Single Script's / Project's Environment Variables
+    elif data.startswith("env_wipe_one_") or data.startswith("env_wipe_"):
+        fname = data.replace("env_wipe_one_", "").replace("env_wipe_", "")
+        info = resolve_env_target_info(fname)
+        answer_callback(callback_id, f"Wiping environment for {info['display_name']}...")
         
         # 1. Clear from vault
         vault = load_env_vault()
-        clean = fname.replace("scripts/", "").lstrip("/").replace("\\", "/")
-        base_stem = clean.rsplit(".", 1)[0]
-        
-        keys_to_remove = [
-            k for k in list(vault.keys())
-            if k == clean or k == fname or k == base_stem 
-            or os.path.basename(k) == clean or os.path.basename(k) == base_stem
-            or (("/" in clean) and k.startswith(clean.split("/")[0]))
-        ]
-        for k in keys_to_remove:
-            vault.pop(k, None)
+        for vk in info["vault_keys"]:
+            vault.pop(vk, None)
         save_env_vault(vault)
         
         # 2. Delete physical .env files on disk
-        dir_name = os.path.dirname(clean)
-        target_dir = os.path.join(SCRIPTS_DIR, dir_name) if dir_name else SCRIPTS_DIR
-        for ef in [os.path.join(target_dir, ".env"), os.path.join(target_dir, f"{os.path.basename(base_stem)}.env")]:
+        for ef in info["env_file_candidates"]:
             if os.path.exists(ef):
                 try:
                     os.remove(ef)
@@ -3330,11 +3781,10 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                     pass
                     
         # 3. Synchronize deletion to GitHub in background
-        threading.Thread(target=git_sync_to_github, args=(f"Wipe .env variables for {clean}",), daemon=True).start()
+        threading.Thread(target=git_sync_to_github, args=(f"Wipe .env variables for {info['display_name']}",), daemon=True).start()
         
-        answer_callback(callback_id, f"✅ Environment wiped for {fname}!", show_alert=True)
-        # Refresh current view in real-time
-        prompt_script_env_dashboard(chat_id, user_id, fname, message_id)
+        answer_callback(callback_id, f"✅ Environment wiped for {info['display_name']}!", show_alert=True)
+        prompt_script_env_dashboard(chat_id, user_id, info["name"], message_id)
 
     # 2f3. Wipe All Script Environments Confirmation Prompt
     elif data == "env_wipe_all_prompt":
@@ -3342,7 +3792,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         text = (
             "💣 <b>Confirm Delete All (.env) Variables</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ <b>WARNING:</b> This will permanently delete <b>ALL environment variables and .env vaults</b> across ALL scripts in your workspace!\n\n"
+            "⚠️ <b>WARNING:</b> This will permanently delete <b>ALL environment variables and .env vaults</b> across ALL scripts and projects in your workspace!\n\n"
             "Are you absolutely sure?"
         )
         markup = {
@@ -3376,7 +3826,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                     except Exception:
                         pass
                         
-        # 3. Synchronize deletion to GitHub
+        # 3. Synchronize deletion to GitHub in background
         threading.Thread(target=git_sync_to_github, args=("Wipe all per-script .env vaults via Telegram",), daemon=True).start()
         
         answer_callback(callback_id, "✅ All .env variables deleted successfully in real-time!", show_alert=True)
@@ -3385,12 +3835,15 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
     # 2g. Export .env file
     elif data.startswith("env_exp_"):
         fname = data.replace("env_exp_", "")
-        env_path = get_script_env_path(fname)
+        info = resolve_env_target_info(fname)
+        env_path = info["primary_dot_env"]
+        # Ensure latest env is written before export
+        read_script_env(info["name"])
         if os.path.exists(env_path):
-            answer_callback(callback_id, f"Exporting {fname.rsplit('.', 1)[0]}.env...")
-            send_tg_document(chat_id, env_path, caption=f"📄 <b>{os.path.basename(env_path)}</b>")
+            answer_callback(callback_id, f"Exporting {info['display_name']} .env...")
+            send_tg_document(chat_id, env_path, caption=f"📄 <b>{info['display_name']}/.env</b>")
         else:
-            answer_callback(callback_id, "No .env file found for this script.", show_alert=True)
+            answer_callback(callback_id, "No .env variables found for this project.", show_alert=True)
 
     # 2h. View Virtualenv Packages
     elif data.startswith("venv_list_"):
@@ -3936,8 +4389,10 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 with open(req, "r", encoding="utf-8", errors="ignore") as rf:
                     req_count += len([l for l in rf if l.strip() and not l.startswith("#")])
                     
+        target_name = entry_script or next_proj_name
+        info = resolve_env_target_info(target_name)
         env_count = 0
-        if found_envs and entry_script:
+        if found_envs:
             for ef in found_envs:
                 parsed = {}
                 with open(ef, "r", encoding="utf-8", errors="ignore") as rf:
@@ -3949,22 +4404,19 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
                 if parsed:
-                    curr_env = read_script_env(entry_script)
+                    curr_env = read_script_env(info["name"])
                     curr_env.update(parsed)
-                    write_script_env(entry_script, curr_env)
+                    write_script_env(info["name"], curr_env)
                     env_count += len(parsed)
-                try:
-                    os.remove(ef)
-                except Exception:
-                    pass
                     
-        git_sync_to_github(f"Deploy new separate project: {next_proj_name}")
+        threading.Thread(target=git_sync_to_github, args=(f"Deploy new separate project: {next_proj_name}",), daemon=True).start()
         
         launch_status = ""
         if entry_script:
             ok_run, run_msg = start_child_app(entry_script, force_restart=True)
             launch_status = f"🟢 <b>Status:</b> <code>{entry_script}</code> is now <b>RUNNING!</b>" if ok_run else f"⚠️ <b>Status:</b> {run_msg}"
             
+        env_info_str = f"{env_count} variables loaded" if env_count else "⚠️ No .env found (Set variables before running!)"
         success_msg = (
             f"🚀 <b>New Project Deployed Successfully!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -3973,18 +4425,25 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             f"🎯 <b>Detected Entry Script:</b> <code>{entry_script or 'None'}</code>\n"
             f"{launch_status}\n"
             f"📦 <b>Dependencies:</b> {'Installed packages' if found_reqs else 'None'}\n"
-            f"🔒 <b>Environment:</b> {str(env_count) + ' variables loaded' if env_count else 'None'}\n"
+            f"🔒 <b>Environment:</b> {env_info_str}\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "<i>Manage your new project using the buttons below:</i>"
         )
         buttons = []
         if entry_script:
             buttons.append([{"text": f"🛑 Stop {os.path.basename(entry_script)}", "callback_data": f"confirm_stop_prompt_{entry_script}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{entry_script}"}])
-            buttons.append([{"text": f"⚙️ Configure {os.path.basename(entry_script)} ENV", "callback_data": f"env_dash_{entry_script}"}])
+        
+        env_btn_row = [{"text": f"⚙️ Manage ENV ({env_count})", "callback_data": f"env_dash_{info['slug']}"}]
+        if env_count == 0:
+            env_btn_row.insert(0, {"text": "➕ Set ENVs Now", "callback_data": f"env_add_{info['slug']}"})
+        buttons.append(env_btn_row)
+        
+        if entry_script:
             buttons.append([{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{entry_script}"}])
         buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}])
         buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
         
+        user_states[user_id] = {"action": "PROJECT_DEPLOYED", "last_project": info["name"]}
         edit_tg_message(chat_id, message_id, success_msg, reply_markup={"inline_keyboard": buttons})
 
     # 4e. Duplicate ZIP Project: 2. Update the Old (Complete Clean Replacement)
@@ -4001,39 +4460,13 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         answer_callback(callback_id, f"Wiping old {zip_base} and deploying fresh...")
         user_states.pop(user_id, None)
         
-        # 1. Stop old running processes & release file locks
-        stop_child_app(script_name=zip_base, clear_active=True)
-        time.sleep(0.5)
-        
-        # 2. Completely delete old files, old databases, and companion sessions from disk and Git
-        old_target_dir = os.path.join(SCRIPTS_DIR, zip_base)
-        try:
-            subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", f"scripts/{zip_base}", zip_base], cwd=WORKSPACE_DIR, capture_output=True)
-        except Exception:
-            pass
-        if os.path.exists(old_target_dir):
-            import shutil
-            shutil.rmtree(old_target_dir, ignore_errors=True)
+        # Completely delete old project, all old files, databases, .env files, and vault entries!
+        purge_project_or_script_completely(zip_base)
+        time.sleep(0.3)
             
-        old_venv = os.path.join(VENVS_DIR, zip_base)
-        if os.path.exists(old_venv):
-            import shutil
-            shutil.rmtree(old_venv, ignore_errors=True)
-
-        # 3. Purge previous vault entries for this project so old .env variables are NOT retained
-        vault = load_env_vault()
-        keys_to_purge = [
-            k for k in list(vault.keys())
-            if k == zip_base or k.startswith(f"{zip_base}/") or os.path.dirname(k) == zip_base or os.path.basename(k) == zip_base
-        ]
-        for k in keys_to_purge:
-            vault.pop(k, None)
-        save_env_vault(vault)
-        config["env_vault"] = vault
-        save_config(config)
-            
-        # 4. Extract fresh new project code
+        # Extract fresh new project code
         import zipfile
+        old_target_dir = os.path.join(SCRIPTS_DIR, zip_base)
         os.makedirs(old_target_dir, exist_ok=True)
         extracted_files = []
         try:
@@ -4080,8 +4513,10 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 with open(req, "r", encoding="utf-8", errors="ignore") as rf:
                     req_count += len([l for l in rf if l.strip() and not l.startswith("#")])
                     
+        target_name = entry_script or zip_base
+        info = resolve_env_target_info(target_name)
         env_count = 0
-        if found_envs and entry_script:
+        if found_envs:
             for ef in found_envs:
                 parsed = {}
                 with open(ef, "r", encoding="utf-8", errors="ignore") as rf:
@@ -4093,21 +4528,17 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
                 if parsed:
-                    # Save ONLY fresh new variables to vault (no old variable retention)
-                    write_script_env(entry_script, parsed)
+                    write_script_env(info["name"], parsed)
                     env_count += len(parsed)
-                try:
-                    os.remove(ef)
-                except Exception:
-                    pass
                     
-        git_sync_to_github(f"Update and redeploy project: {zip_base}")
+        threading.Thread(target=git_sync_to_github, args=(f"Update and redeploy project: {zip_base}",), daemon=True).start()
         
         launch_status = ""
         if entry_script:
             ok_run, run_msg = start_child_app(entry_script, force_restart=True)
             launch_status = f"🟢 <b>Status:</b> <code>{entry_script}</code> is now <b>RUNNING!</b>" if ok_run else f"⚠️ <b>Status:</b> {run_msg}"
             
+        env_info_str = f"{env_count} fresh variables loaded" if env_count else "Clean (No .env found - set variables before running)"
         success_msg = (
             f"🔄 <b>Project Updated & Redeployed!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -4116,7 +4547,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
             f"🎯 <b>Detected Entry Script:</b> <code>{entry_script or 'None'}</code>\n"
             f"{launch_status}\n"
             f"📦 <b>Dependencies:</b> {'Installed packages' if found_reqs else 'None'}\n"
-            f"🔒 <b>Environment:</b> {str(env_count) + ' fresh variables loaded' if env_count else 'Clean (No .env)'}\n"
+            f"🔒 <b>Environment:</b> {env_info_str}\n"
             f"🗑️ <b>Cleanup:</b> <i>Old code, stale .env, and old databases permanently wiped!</i>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "<i>Manage your updated project using the buttons below:</i>"
@@ -4124,11 +4555,18 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         buttons = []
         if entry_script:
             buttons.append([{"text": f"🛑 Stop {os.path.basename(entry_script)}", "callback_data": f"confirm_stop_prompt_{entry_script}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{entry_script}"}])
-            buttons.append([{"text": f"⚙️ Configure {os.path.basename(entry_script)} ENV", "callback_data": f"env_dash_{entry_script}"}])
+        
+        env_btn_row = [{"text": f"⚙️ Manage ENV ({env_count})", "callback_data": f"env_dash_{info['slug']}"}]
+        if env_count == 0:
+            env_btn_row.insert(0, {"text": "➕ Set ENVs Now", "callback_data": f"env_add_{info['slug']}"})
+        buttons.append(env_btn_row)
+        
+        if entry_script:
             buttons.append([{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{entry_script}"}])
         buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}])
         buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
         
+        user_states[user_id] = {"action": "PROJECT_DEPLOYED", "last_project": info["name"]}
         edit_tg_message(chat_id, message_id, success_msg, reply_markup={"inline_keyboard": buttons})
 
     # 4f. Cancel ZIP Upload
@@ -4237,16 +4675,20 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
     # 9. Download File / Project Archive
     elif data.startswith("file_dl_"):
-        fname = data.replace("file_dl_", "")
-        target_path = os.path.join(SCRIPTS_DIR, fname)
+        raw_target = data.replace("file_dl_", "")
+        info = resolve_env_target_info(raw_target)
+        target_path = info["project_dir"] if (info["is_project"] and os.path.exists(info["project_dir"])) else os.path.join(SCRIPTS_DIR, info["name"])
         if not os.path.exists(target_path):
-            target_path = os.path.join(WORKSPACE_DIR, fname)
+            target_path = os.path.join(SCRIPTS_DIR, raw_target)
+        if not os.path.exists(target_path):
+            target_path = os.path.join(WORKSPACE_DIR, raw_target)
 
+        fname = info["display_name"]
         if os.path.exists(target_path):
             if os.path.isdir(target_path):
                 import shutil
                 answer_callback(callback_id, f"Archiving {fname} to ZIP...")
-                zip_base = os.path.join(WORKSPACE_DIR, f"temp_{fname}")
+                zip_base = os.path.join(WORKSPACE_DIR, f"temp_{info['slug']}")
                 zip_path = shutil.make_archive(zip_base, 'zip', target_path)
                 send_tg_document(chat_id, zip_path, caption=f"📦 <b>Project Archive:</b> <code>{fname}.zip</code>")
                 try:
@@ -4382,17 +4824,26 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
 
     # 10c. Confirm Delete Single Script / Project Prompt
     elif data.startswith("confirm_del_file_"):
-        fname = data.replace("confirm_del_file_", "")
+        raw_target = data.replace("confirm_del_file_", "")
         answer_callback(callback_id)
+        info = resolve_env_target_info(raw_target)
+        
+        type_str = "Project Directory" if info["is_project"] else "Script File"
         text = (
-            f"🗑️ <b>Confirm Permanent Deletion</b>\n"
+            f"🗑️ <b>Confirm Permanent Deletion ({type_str})</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Are you sure you want to <b>PERMANENTLY DELETE</b> <code>{fname}</code>?\n\n"
-            f"⚠️ <i>This action will terminate running processes and permanently delete all code, files, and databases from the GitHub repository in real-time.</i>"
+            f"Are you sure you want to <b>PERMANENTLY DELETE</b> <code>{info['display_name']}</code>?\n\n"
+            f"⚠️ <b>This will immediately and permanently delete:</b>\n"
+            f"• All project files, subdirectories, and code\n"
+            f"• All <code>.env</code> files from disk & cloud vault\n"
+            f"• All databases, sessions, and virtual environments\n"
+            f"• Terminate any running child processes in real-time\n"
+            f"• Synchronize complete deletion to GitHub repository\n\n"
+            f"<i>This action cannot be undone!</i>"
         )
         markup = {
             "inline_keyboard": [
-                [{"text": "🗑️ Yes, Delete from GitHub", "callback_data": f"do_delete_file_{fname}"}],
+                [{"text": "🗑️ Yes, Delete Everywhere Now", "callback_data": f"do_delete_file_{info['slug']}"}],
                 [{"text": "❌ Cancel", "callback_data": "menu_files"}]
             ]
         }
@@ -4401,193 +4852,18 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
     # 10d. Direct & Fast Delete Single File/Folder Execution
     elif data.startswith("file_del_") or data.startswith("do_delete_file_"):
         if data.startswith("do_delete_file_"):
-            fname = data.replace("do_delete_file_", "")
+            raw_target = data.replace("do_delete_file_", "")
         else:
-            fname = data.replace("file_del_", "")
+            raw_target = data.replace("file_del_", "")
         
-        if fname in ["all", "all_prompt"]:
+        if raw_target in ["all", "all_prompt"]:
             return
             
-        # 1. Answer callback INSTANTLY so Telegram spinner immediately clears!
-        answer_callback(callback_id, f"🗑️ Deleting {fname}...", show_alert=False)
+        answer_callback(callback_id, f"🗑️ Deleting in real-time...", show_alert=False)
         
-        # 2. Determine exact targets and project directory
-        clean_fname = fname.replace("scripts/", "").lstrip("/").replace("\\", "/")
-        base_stem = clean_fname.rsplit(".", 1)[0]
-        parts = clean_fname.split("/")
+        ok, info = purge_project_or_script_completely(raw_target)
         
-        # Identify project folder name if this is part of a project folder
-        project_folder_name = parts[0] if len(parts) > 1 else None
-        if not project_folder_name and os.path.isdir(os.path.join(SCRIPTS_DIR, clean_fname)):
-            project_folder_name = clean_fname
-            
-        # 3. Stop running processes matching this script or its parent project
-        stop_child_app(script_name=fname, clear_active=True)
-        if project_folder_name:
-            stop_child_app(script_name=project_folder_name, clear_active=True)
-        time.sleep(0.5)
-        
-        # 4. Explicitly remove all candidate paths from Git index in WORKSPACE_DIR
-        git_targets_to_rm = [
-            f"scripts/{clean_fname}",
-            f"scripts/{fname}",
-            f"scripts/{base_stem}",
-            clean_fname,
-            fname,
-            base_stem,
-        ]
-        if project_folder_name:
-            git_targets_to_rm.extend([
-                f"scripts/{project_folder_name}",
-                project_folder_name
-            ])
-            
-        for g_tgt in git_targets_to_rm:
-            try:
-                subprocess.run(["git", "rm", "-r", "-f", "--ignore-unmatch", g_tgt], cwd=WORKSPACE_DIR, capture_output=True)
-            except Exception:
-                pass
-
-        # 5. Clean up disk completely (including the entire project folder, databases, sessions, journals)
-        import shutil
-        disk_paths_to_remove = [
-            os.path.join(SCRIPTS_DIR, clean_fname),
-            os.path.join(SCRIPTS_DIR, fname),
-            os.path.join(WORKSPACE_DIR, clean_fname),
-            os.path.join(WORKSPACE_DIR, fname),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.requirements.txt"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.env"),
-            os.path.join(SCRIPTS_DIR, f"{clean_fname}.env"),
-            os.path.join(SCRIPTS_DIR, f"{clean_fname}.requirements.txt"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.session"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.session-journal"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.session-shm"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.session-wal"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.db"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.db-journal"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.db-wal"),
-            os.path.join(SCRIPTS_DIR, f"{base_stem}.db-shm"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.session"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.session-journal"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.session-shm"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.session-wal"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.db"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.db-journal"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.db-wal"),
-            os.path.join(WORKSPACE_DIR, f"{base_stem}.db-shm"),
-        ]
-        
-        if project_folder_name:
-            disk_paths_to_remove.extend([
-                os.path.join(SCRIPTS_DIR, project_folder_name),
-                os.path.join(WORKSPACE_DIR, project_folder_name),
-            ])
-            
-        for dp in disk_paths_to_remove:
-            if os.path.exists(dp):
-                try:
-                    if os.path.isdir(dp):
-                        shutil.rmtree(dp, ignore_errors=True)
-                    else:
-                        os.remove(dp)
-                except Exception as e_del:
-                    logger.error(f"Error removing {dp}: {e_del}")
-
-        # 6. Recursively find and delete all residual databases, sessions, staging, and logs matching this script or project
-        search_keys = [clean_fname.lower(), base_stem.lower()]
-        if project_folder_name:
-            search_keys.append(project_folder_name.lower())
-            
-        db_and_session_exts = {".db", ".sqlite", ".sqlite3", ".session", ".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"}
-        
-        for search_root in [SCRIPTS_DIR, WORKSPACE_DIR]:
-            if not os.path.exists(search_root):
-                continue
-            for root, dirs, files in os.walk(search_root):
-                if ".git" in root:
-                    continue
-                for f in files:
-                    f_lower = f.lower()
-                    ext = os.path.splitext(f_lower)[1]
-                    matches_key = any(k in f_lower for k in search_keys if len(k) >= 3)
-                    
-                    if matches_key and (ext in db_and_session_exts or f_lower.startswith(".staging_") or f_lower.startswith("temp_") or f_lower.startswith("logs_")):
-                        target_file = os.path.join(root, f)
-                        try:
-                            os.remove(target_file)
-                            rel_target = os.path.relpath(target_file, WORKSPACE_DIR).replace("\\", "/")
-                            subprocess.run(["git", "rm", "-f", "--ignore-unmatch", rel_target], cwd=WORKSPACE_DIR, capture_output=True)
-                        except Exception:
-                            pass
-
-        # 7. Clean up isolated virtualenvs
-        venv_slugs = [
-            re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_fname),
-            re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_stem),
-        ]
-        if project_folder_name:
-            venv_slugs.append(re.sub(r'[^a-zA-Z0-9_\-\.]', '_', project_folder_name))
-            
-        for vslug in venv_slugs:
-            v_dir = os.path.join(VENVS_DIR, vslug)
-            if os.path.exists(v_dir):
-                try:
-                    shutil.rmtree(v_dir, ignore_errors=True)
-                except Exception:
-                    pass
-
-        # 8. Clean up config active_scripts, manually_stopped_scripts, and vault
-        current_active = list(config.get("active_scripts", []))
-        config["active_scripts"] = [
-            s for s in current_active 
-            if s != clean_fname and s != fname and not (project_folder_name and (s == project_folder_name or s.startswith(f"{project_folder_name}/") or os.path.dirname(s) == project_folder_name))
-        ]
-        stopped = list(config.get("manually_stopped_scripts", []))
-        config["manually_stopped_scripts"] = [
-            s for s in stopped 
-            if s != clean_fname and s != fname and not (project_folder_name and (s == project_folder_name or s.startswith(f"{project_folder_name}/") or os.path.dirname(s) == project_folder_name))
-        ]
-        if config.get("active_script") in [clean_fname, fname] or (project_folder_name and (config.get("active_script") == project_folder_name or str(config.get("active_script", "")).startswith(f"{project_folder_name}/"))):
-            config["active_script"] = None
-
-        vault = load_env_vault()
-        keys_to_del = [
-            k for k in list(vault.keys()) 
-            if k == clean_fname 
-            or k == fname 
-            or k.startswith(f"{clean_fname}/") 
-            or (project_folder_name and (k == project_folder_name or k.startswith(f"{project_folder_name}/") or os.path.dirname(k) == project_folder_name))
-            or os.path.basename(k) == clean_fname
-            or os.path.basename(k) == base_stem
-        ]
-        for k in keys_to_del:
-            vault.pop(k, None)
-        save_env_vault(vault)
-        config["env_vault"] = vault
-        save_config(config)
-
-        # 9. Thread-safe background sync to permanently push deletion to GitHub repo!
-        def async_delete_sync(target_disp_name):
-            ok_sync, sync_msg = git_sync_to_github(f"Permanently delete scripts/{target_disp_name} from repository")
-            if ok_sync:
-                logger.info(f"Permanently deleted scripts/{target_disp_name} from GitHub.")
-                notify_all_admins(
-                    f"🗑️ <b>Permanently Deleted from GitHub:</b>\n"
-                    f"• Target: <code>scripts/{target_disp_name}</code>\n"
-                    f"✅ Remote repository is updated in real-time."
-                )
-            else:
-                logger.error(f"GitHub deletion sync failed for {target_disp_name}: {sync_msg}")
-                notify_all_admins(
-                    f"⚠️ <b>GitHub Deletion Sync Error:</b>\n"
-                    f"Local files deleted, but cloud sync failed for <code>scripts/{target_disp_name}</code>:\n"
-                    f"<code>{sync_msg}</code>"
-                )
-
-        target_disp = project_folder_name or clean_fname
-        threading.Thread(target=async_delete_sync, args=(target_disp,), daemon=True).start()
-
-        # 10. Refresh Telegram View in Real Time!
+        answer_callback(callback_id, f"🗑️ {info['display_name']} and all associated files/ENVs deleted everywhere!", show_alert=True)
         show_files_view(chat_id, message_id)
 
     # 11. Pip prompt
@@ -4976,9 +5252,11 @@ def handle_document_upload(chat_id, user_id, doc):
                 with open(req, "r", encoding="utf-8", errors="ignore") as rf:
                     req_installed_count += len([l for l in rf if l.strip() and not l.startswith("#")])
 
-        # Auto-Load & Bind .env Variables into AES-256 Encrypted Vault and purge plain files
+        # Auto-Load & Bind .env Variables into AES-256 Encrypted Vault
         env_loaded_count = 0
-        if found_envs and entry_script:
+        target_name = entry_script or (os.path.basename(extracted_project_dir) if extracted_project_dir else zip_base)
+        info = resolve_env_target_info(target_name)
+        if found_envs:
             for ef in found_envs:
                 parsed = {}
                 with open(ef, "r", encoding="utf-8", errors="ignore") as rf:
@@ -4991,18 +5269,14 @@ def handle_document_upload(chat_id, user_id, doc):
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
                 if parsed:
-                    curr_env = read_script_env(entry_script)
+                    curr_env = read_script_env(info["name"])
                     curr_env.update(parsed)
-                    write_script_env(entry_script, curr_env)
+                    write_script_env(info["name"], curr_env)
                     env_loaded_count += len(parsed)
-                # Purge raw plaintext .env from disk so git never commits it!
-                try:
-                    os.remove(ef)
-                except Exception:
-                    pass
+                # Note: .env is preserved locally on disk for python-dotenv, protected from git via .gitignore
 
-        # Sync project code safely to GitHub cloud
-        git_sync_to_github(f"Deploy ZIP project: {zip_base}")
+        # Sync project code safely to GitHub cloud in background
+        threading.Thread(target=git_sync_to_github, args=(f"Deploy ZIP project: {zip_base}",), daemon=True).start()
 
         # Auto-Launch the newly uploaded project entry script immediately!
         launch_status_text = ""
@@ -5014,6 +5288,7 @@ def handle_document_upload(chat_id, user_id, doc):
                 launch_status_text = f"⚠️ <b>Launch Note:</b> {run_msg}"
 
         entry_display = entry_script or 'None'
+        env_info_str = f"{env_loaded_count} variables loaded" if env_loaded_count else "⚠️ No .env found (Set variables before running!)"
         deploy_msg = (
             f"🚀 <b>ZIP Project Deployed & Launched!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -5022,18 +5297,25 @@ def handle_document_upload(chat_id, user_id, doc):
             f"🎯 <b>Detected Entry Script:</b> <code>{entry_display}</code>\n"
             f"{launch_status_text}\n"
             f"📦 <b>Dependencies:</b> {'Installed ~' + str(req_installed_count) + ' packages' if found_reqs else 'No requirements.txt found'}\n"
-            f"🔒 <b>Environment:</b> {str(env_loaded_count) + ' variables loaded' if env_loaded_count else 'No .env found'}\n"
+            f"🔒 <b>Environment:</b> {env_info_str}\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "<i>Manage your project using the buttons below:</i>"
         )
         buttons = []
         if entry_script:
             buttons.append([{"text": f"🛑 Stop {os.path.basename(entry_script)}", "callback_data": f"confirm_stop_prompt_{entry_script}"}, {"text": "🔄 Restart", "callback_data": f"exec_run_{entry_script}"}])
-            buttons.append([{"text": f"⚙️ Configure {os.path.basename(entry_script)} ENV", "callback_data": f"env_dash_{entry_script}"}])
+        
+        env_btn_row = [{"text": f"⚙️ Manage ENV ({env_loaded_count})", "callback_data": f"env_dash_{info['slug']}"}]
+        if env_loaded_count == 0:
+            env_btn_row.insert(0, {"text": "➕ Set ENVs Now", "callback_data": f"env_add_{info['slug']}"})
+        buttons.append(env_btn_row)
+        
+        if entry_script:
             buttons.append([{"text": "📋 View Live Logs", "callback_data": f"show_log_for_{entry_script}"}])
         buttons.append([{"text": "🚀 Scripts Runner", "callback_data": "menu_runner"}, {"text": "📂 View Files", "callback_data": "menu_files"}])
         buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
 
+        user_states[user_id] = {"action": "PROJECT_DEPLOYED", "last_project": info["name"]}
         send_tg_message(chat_id, deploy_msg, reply_markup={"inline_keyboard": buttons})
         return
 
@@ -5108,24 +5390,80 @@ def handle_document_upload(chat_id, user_id, doc):
 
     # 3. If uploaded a .env file
     elif file_name.endswith(".env") or file_name == ".env":
-        target_py = "bot.py" if file_name == ".env" else file_name[:-4] + ".py"
-        parsed_vars = read_script_env(target_py)
-        count = len(parsed_vars)
-        text = (
-            f"🔒 <b>Environment File Saved:</b> <code>scripts/{file_name}</code>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• <b>Linked Script:</b> <code>scripts/{target_py}</code>\n"
-            f"• <b>Total Variables Loaded:</b> {count}\n\n"
-            f"📁 Saved and backed up to Cloud Storage."
+        # Parse all variables from the uploaded file
+        uploaded_vars = {}
+        if os.path.exists(scripts_path):
+            with open(scripts_path, "r", encoding="utf-8", errors="ignore") as f:
+                for l in f:
+                    l = l.strip()
+                    if "=" in l and not l.startswith("#"):
+                        k, v = l.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k:
+                            uploaded_vars[k] = v
+
+        # Determine target project
+        current_state = user_states.get(user_id)
+        if isinstance(current_state, dict) and current_state.get("action") == "WAITING_ENV_VAR":
+            target = current_state.get("target_py")
+            user_states.pop(user_id, None)
+        elif isinstance(current_state, dict) and current_state.get("last_project"):
+            target = current_state.get("last_project")
+            user_states.pop(user_id, None)
+        else:
+            base_file = file_name[:-4] if file_name.endswith(".env") and file_name != ".env" else ""
+            if base_file and os.path.isdir(os.path.join(SCRIPTS_DIR, base_file)):
+                target = base_file
+            else:
+                targets = get_manageable_targets()
+                active = get_active_running_processes()
+                if len(targets) == 1:
+                    target = targets[0]["name"]
+                elif active:
+                    target = list(active.keys())[0]
+                elif targets:
+                    target = targets[0]["name"]
+                else:
+                    target = "bot.py"
+
+        info = resolve_env_target_info(target)
+        if uploaded_vars:
+            curr = read_script_env(info["name"])
+            curr.update(uploaded_vars)
+            write_script_env(info["name"], curr)
+
+        active = get_active_running_processes()
+        is_running = (
+            info["entry_script"] in active or
+            info["name"] in active or
+            any(k.startswith(f"{info['name']}/") or k == info['name'] for k in active.keys())
         )
-        markup = {
-            "inline_keyboard": [
-                [{"text": f"⚙️ Manage {target_py} ENV", "callback_data": f"env_dash_{target_py}"}],
-                [{"text": f"▶️ Run {target_py}", "callback_data": f"exec_run_{target_py}"}],
-                [{"text": "🔙 Main Menu", "callback_data": "menu_main"}]
-            ]
-        }
-        send_tg_message(chat_id, text, reply_markup=markup)
+        running_key = next((k for k in active.keys() if k == info["entry_script"] or k == info["name"] or k.startswith(f"{info['name']}/")), info["entry_script"]) if is_running else info["entry_script"]
+
+        restart_hint = ""
+        if is_running:
+            restart_hint = "\n\n⚡ <i>This script is currently RUNNING. Tap <b>🔄 Apply & Restart</b> below to load new variables immediately!</i>"
+
+        text = (
+            f"🔒 <b>Environment File Applied:</b> <code>scripts/{file_name}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Assigned Project:</b> <code>{info['display_name']}</code>\n"
+            f"• <b>Variables Loaded:</b> <code>{len(uploaded_vars)}</code>\n"
+            f"• <b>Target File:</b> <code>{os.path.relpath(info['primary_dot_env'], WORKSPACE_DIR)}</code>\n\n"
+            f"📁 Variables saved to project directory and backed up to Cloud!"
+            + restart_hint
+        )
+        buttons = [
+            [{"text": f"⚙️ Manage {info['display_name']} ENV", "callback_data": f"env_dash_{info['slug']}"}]
+        ]
+        if is_running:
+            buttons.append([{"text": "🔄 Apply & Restart Script", "callback_data": f"exec_run_{running_key}"}])
+        else:
+            buttons.append([{"text": f"▶️ Run {info['display_name']} Now", "callback_data": f"exec_run_{info['entry_script']}"}])
+        buttons.append([{"text": "🔙 Main Menu", "callback_data": "menu_main"}])
+
+        send_tg_message(chat_id, text, reply_markup={"inline_keyboard": buttons})
         
     else:
         send_tg_message(
