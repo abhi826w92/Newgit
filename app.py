@@ -2389,7 +2389,7 @@ def write_script_env(py_filename, env_dict):
         logger.error(f"write_script_env error: {e}")
         return False, f"Error saving env: {e}"
 
-def purge_project_or_script_completely(target_name):
+def purge_project_or_script_completely(target_name, exclude_paths=None):
     """
     Completely and permanently deletes a project or standalone script everywhere:
     1. Immediately terminates running child processes matching this project or script.
@@ -2398,7 +2398,7 @@ def purge_project_or_script_completely(target_name):
     4. Clears all associated keys from .env_vault.json and config['env_vault'].
     5. Cleans all references from config['active_scripts'], config['manually_stopped_scripts'], etc.
     6. Removes isolated virtualenvs (.venvs/).
-    7. Cleans all databases, sessions, logs, temporary/staging archives.
+    7. Cleans all databases, sessions, logs, temporary archives.
     8. Stages complete removal from Git index and triggers background push to GitHub.
     """
     import shutil, signal, re
@@ -2412,6 +2412,30 @@ def purge_project_or_script_completely(target_name):
     slug = info["slug"]
     entry_script = info["entry_script"]
     base_stem = proj_name.rsplit(".", 1)[0]
+    
+    exclude_set = set()
+    if exclude_paths:
+        for ep in exclude_paths:
+            if ep:
+                try: exclude_set.add(os.path.realpath(ep))
+                except Exception: pass
+
+    # Always preserve any active upload staging paths from user_states!
+    for u_state in list(user_states.values()):
+        if isinstance(u_state, dict) and u_state.get("staging_path"):
+            try: exclude_set.add(os.path.realpath(u_state["staging_path"]))
+            except Exception: pass
+            
+    def is_excluded(path_to_check):
+        if not path_to_check:
+            return False
+        try:
+            real_p = os.path.realpath(path_to_check)
+            if real_p in exclude_set:
+                return True
+        except Exception:
+            pass
+        return False
     
     # 1. Real-time Process Termination
     stop_child_app(script_name=clean_target, clear_active=True)
@@ -2453,7 +2477,7 @@ def purge_project_or_script_completely(target_name):
             running_processes.pop(k, None)
             
     # 2. Disk Cleanup: Project Directory or Single File
-    if is_project and proj_dir not in [SCRIPTS_DIR, WORKSPACE_DIR] and os.path.exists(proj_dir):
+    if is_project and proj_dir not in [SCRIPTS_DIR, WORKSPACE_DIR] and os.path.exists(proj_dir) and not is_excluded(proj_dir):
         try:
             shutil.rmtree(proj_dir, ignore_errors=True)
         except Exception as e:
@@ -2463,7 +2487,7 @@ def purge_project_or_script_completely(target_name):
             
     # Standalone single file
     single_script_path = os.path.join(SCRIPTS_DIR, clean_target)
-    if os.path.exists(single_script_path):
+    if os.path.exists(single_script_path) and not is_excluded(single_script_path):
         try:
             if os.path.isdir(single_script_path) and single_script_path not in [SCRIPTS_DIR, WORKSPACE_DIR]:
                 shutil.rmtree(single_script_path, ignore_errors=True)
@@ -2474,7 +2498,7 @@ def purge_project_or_script_completely(target_name):
 
     # Check root workspace mirror if exists
     ws_mirror = os.path.join(WORKSPACE_DIR, proj_name)
-    if os.path.exists(ws_mirror) and ws_mirror not in [WORKSPACE_DIR, SCRIPTS_DIR]:
+    if os.path.exists(ws_mirror) and ws_mirror not in [WORKSPACE_DIR, SCRIPTS_DIR] and not is_excluded(ws_mirror):
         try:
             if os.path.isdir(ws_mirror):
                 shutil.rmtree(ws_mirror, ignore_errors=True)
@@ -2497,7 +2521,7 @@ def purge_project_or_script_completely(target_name):
         os.path.join(WORKSPACE_DIR, f"{slug}.env"),
     ]
     for ef in set(all_env_paths):
-        if ef and os.path.exists(ef):
+        if ef and os.path.exists(ef) and not is_excluded(ef):
             try:
                 os.remove(ef)
             except Exception as e:
@@ -2517,13 +2541,13 @@ def purge_project_or_script_completely(target_name):
         os.path.join(WORKSPACE_DIR, f"temp_{slug}.zip"),
     ]
     for cf in companion_files:
-        if os.path.exists(cf):
+        if os.path.exists(cf) and not is_excluded(cf):
             try:
                 os.remove(cf)
             except Exception:
                 pass
 
-    # Clean residual databases, sqlite, session, journal, wal files
+    # Clean residual databases, sqlite, session, journal, wal files (NEVER touch .staging_* or excluded files!)
     search_keys = [proj_name.lower(), clean_target.lower(), base_stem.lower(), slug.lower()]
     db_exts = {".db", ".sqlite", ".sqlite3", ".session", ".session-journal", ".session-shm", ".session-wal", ".db-journal", ".db-wal", ".db-shm"}
     for search_root in [SCRIPTS_DIR, WORKSPACE_DIR]:
@@ -2531,13 +2555,12 @@ def purge_project_or_script_completely(target_name):
             continue
         try:
             for it in os.listdir(search_root):
+                if it.startswith(".staging_") or it.startswith(".git"):
+                    continue
                 it_path = os.path.join(search_root, it)
-                if it.startswith(".staging_") and any(k in it.lower() for k in search_keys if len(k) >= 3):
-                    try:
-                        if os.path.isdir(it_path): shutil.rmtree(it_path, ignore_errors=True)
-                        else: os.remove(it_path)
-                    except Exception: pass
-                elif os.path.isfile(it_path):
+                if is_excluded(it_path):
+                    continue
+                if os.path.isfile(it_path):
                     it_lower = it.lower()
                     ext = os.path.splitext(it_lower)[1]
                     if ext in db_exts and any(k in it_lower for k in search_keys if len(k) >= 3):
@@ -4461,8 +4484,13 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
         user_states.pop(user_id, None)
         
         # Completely delete old project, all old files, databases, .env files, and vault entries!
-        purge_project_or_script_completely(zip_base)
+        purge_project_or_script_completely(zip_base, exclude_paths=[staged_path])
         time.sleep(0.3)
+
+        if not os.path.exists(staged_path):
+            logger.error(f"Staged file missing after purge: {staged_path}")
+            edit_tg_message(chat_id, message_id, "❌ Uploaded archive was not found. Please upload again.", reply_markup=get_main_menu_keyboard())
+            return
             
         # Extract fresh new project code
         import zipfile
