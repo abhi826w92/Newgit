@@ -1076,6 +1076,13 @@ def start_child_app(filename="bot.py", force_restart=False):
         else:
             return False, f"File <code>{clean_name}</code> not found in scripts folder."
     
+    # If full_path is a directory, automatically detect the entry script inside it!
+    if os.path.isdir(full_path):
+        detected_entry = detect_project_entry_script(full_path)
+        if detected_entry:
+            clean_name = detected_entry
+            full_path = os.path.join(SCRIPTS_DIR, clean_name)
+
     # Normalize clean_name and absolute path
     clean_name = os.path.normpath(clean_name).replace("\\", "/")
     real_script_path = os.path.realpath(full_path)
@@ -1136,15 +1143,25 @@ def start_child_app(filename="bot.py", force_restart=False):
             script_private_env = read_script_env(clean_name)
             env.update(script_private_env)
             
-            # Ensure a physical .env file exists in the script's cwd so python-dotenv works!
+            # Ensure physical .env files exist in both working dir and project root!
             if script_private_env:
-                target_dot_env = os.path.join(script_working_dir, ".env")
-                try:
-                    with open(target_dot_env, "w", encoding="utf-8") as f:
-                        for k, v in sorted(script_private_env.items()):
-                            f.write(f"{k}={v}\n")
-                except Exception as e:
-                    logger.error(f"Error creating local .env: {e}")
+                dirs_to_write = {script_working_dir}
+                if "/" in clean_name:
+                    dirs_to_write.add(os.path.join(SCRIPTS_DIR, clean_name.split("/")[0]))
+                for d in dirs_to_write:
+                    try:
+                        os.makedirs(d, exist_ok=True)
+                        target_dot_env = os.path.join(d, ".env")
+                        with open(target_dot_env, "w", encoding="utf-8") as f:
+                            for k, v in sorted(script_private_env.items()):
+                                f.write(f"{k}={v}\n")
+                        dotless = os.path.join(d, "env")
+                        if os.path.exists(dotless):
+                            with open(dotless, "w", encoding="utf-8") as f:
+                                for k, v in sorted(script_private_env.items()):
+                                    f.write(f"{k}={v}\n")
+                    except Exception as e:
+                        logger.error(f"Error creating local .env in {d}: {e}")
             
             # Launch using the isolated virtualenv Python binary!
             cmd = [venv_py, "-u", full_path]
@@ -2088,33 +2105,82 @@ def resolve_env_target_info(target):
         
     primary_dot_env = os.path.join(actual_dir, ".env")
     secondary_env = os.path.join(actual_dir, f"{base_stem}.env")
+    is_project = (actual_dir != SCRIPTS_DIR)
+
+    # 1. Resolve all directory levels associated with this target (project root, entry subfolder, nested code dirs)
+    all_target_dirs = []
+    if is_project:
+        all_target_dirs.append(actual_dir)
+        if entry:
+            entry_full = os.path.join(SCRIPTS_DIR, entry)
+            entry_dir = os.path.dirname(entry_full)
+            if entry_dir and os.path.isdir(entry_dir) and entry_dir not in all_target_dirs:
+                all_target_dirs.append(entry_dir)
+        if os.path.isdir(actual_dir):
+            for root, dirs, files in os.walk(actual_dir):
+                if root not in all_target_dirs:
+                    if any(f.endswith(".py") or f in [".env", "env"] or f.endswith(".env") for f in files):
+                        all_target_dirs.append(root)
+    else:
+        all_target_dirs.append(SCRIPTS_DIR)
+        if "/" in clean:
+            sub_d = os.path.dirname(os.path.join(SCRIPTS_DIR, clean))
+            if os.path.isdir(sub_d) and sub_d not in all_target_dirs:
+                all_target_dirs.append(sub_d)
+
+    # 2. Build exhaustive list of candidates across all target directories
+    candidates = []
+    for td in all_target_dirs:
+        candidates.append(os.path.join(td, ".env"))
+        candidates.append(os.path.join(td, "env"))
+        if base_stem:
+            candidates.append(os.path.join(td, f"{base_stem}.env"))
     
-    candidates = [
-        primary_dot_env,
-        secondary_env,
-        os.path.join(SCRIPTS_DIR, ".env"),
-        os.path.join(SCRIPTS_DIR, f"{base_stem}.env")
-    ]
+    # Global fallbacks in scripts/
+    candidates.append(os.path.join(SCRIPTS_DIR, ".env"))
+    candidates.append(os.path.join(SCRIPTS_DIR, f"{base_stem}.env"))
+
     unique_candidates = []
     for c in candidates:
-        if c not in unique_candidates:
+        if c and c not in unique_candidates:
             unique_candidates.append(c)
-            
-    vault_keys = [clean, entry, proj_name, base_name, f"scripts/{clean}", f"scripts/{entry}", f"scripts/{proj_name}"]
-    unique_vault_keys = []
-    for vk in vault_keys:
-        if vk and vk not in unique_vault_keys:
-            unique_vault_keys.append(vk)
-            
-    vault_save_keys = [entry, proj_name] if entry != proj_name else [entry]
-    is_project = (actual_dir != SCRIPTS_DIR)
-    
-    # Generate clean short slug (guaranteed <= 32 chars)
+
+    # 3. Generate clean short slug (guaranteed <= 32 chars)
     raw_slug = proj_name if is_project else entry
     slug = raw_slug.replace(" ", "_").replace("/", "__")
     if len(slug) > 32:
         import hashlib
         slug = slug[:24] + "_" + hashlib.md5(raw_slug.encode()).hexdigest()[:6]
+
+    # 4. Vault lookup keys and synchronized save keys
+    vault_keys = [
+        clean,
+        entry,
+        proj_name,
+        slug,
+        base_name,
+        f"scripts/{clean}",
+        f"scripts/{entry}",
+        f"scripts/{proj_name}",
+        f"scripts/{slug}"
+    ]
+    if "_" in proj_name:
+        vault_keys.append(proj_name.replace("_", " "))
+    if " " in proj_name:
+        vault_keys.append(proj_name.replace(" ", "_"))
+
+    unique_vault_keys = []
+    for vk in vault_keys:
+        if vk and vk not in unique_vault_keys:
+            unique_vault_keys.append(vk)
+
+    # vault_save_keys: save under all core alias keys so no alias ever has stale data
+    vault_save_keys = []
+    for vk in [clean, entry, proj_name, slug]:
+        if vk and vk not in vault_save_keys:
+            if is_project and vk in ["bot.py", "main.py", "app.py"]:
+                continue
+            vault_save_keys.append(vk)
 
     return {
         "type": "project" if is_project else "script",
@@ -2123,6 +2189,7 @@ def resolve_env_target_info(target):
         "is_project": is_project,
         "entry_script": entry,
         "project_dir": actual_dir,
+        "all_project_dirs": all_target_dirs,
         "primary_dot_env": primary_dot_env,
         "secondary_env": secondary_env,
         "env_file_candidates": unique_candidates,
@@ -2277,10 +2344,20 @@ def restore_all_env_vaults_on_boot():
                 continue
                 
             info = resolve_env_target_info(script_name)
-            os.makedirs(os.path.dirname(info["primary_dot_env"]), exist_ok=True)
             content = "\n".join([f"{k}={v}" for k, v in sorted(decrypted_dict.items())]) + "\n"
-            with open(info["primary_dot_env"], "w", encoding="utf-8") as f:
-                f.write(content)
+            target_dirs = info.get("all_project_dirs", [info["project_dir"]])
+            for td in target_dirs:
+                try:
+                    os.makedirs(td, exist_ok=True)
+                    dot_env_path = os.path.join(td, ".env")
+                    with open(dot_env_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    dotless = os.path.join(td, "env")
+                    if os.path.exists(dotless):
+                        with open(dotless, "w", encoding="utf-8") as f:
+                            f.write(content)
+                except Exception:
+                    pass
             logger.info(f"Restored .env on boot for {info['display_name']} -> {info['primary_dot_env']}")
         except Exception as e:
             logger.error(f"Error unpacking vault on boot for {script_name}: {e}")
@@ -2295,7 +2372,7 @@ def read_script_env(py_filename):
     
     # 1. Read from physical .env files on disk first
     for c in reversed(info["env_file_candidates"]):
-        if os.path.exists(c):
+        if os.path.exists(c) and os.path.isfile(c):
             try:
                 with open(c, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
@@ -2329,24 +2406,36 @@ def read_script_env(py_filename):
             except Exception as e:
                 logger.error(f"Error parsing decrypted vault for {info['name']}: {e}")
 
-    # 3. Always ensure physical .env in project directory exists and is updated!
-    if merged_env and info["primary_dot_env"]:
-        try:
-            os.makedirs(os.path.dirname(info["primary_dot_env"]), exist_ok=True)
-            content = "\n".join([f"{k}={v}" for k, v in sorted(merged_env.items())]) + "\n"
-            needs_write = True
-            if os.path.exists(info["primary_dot_env"]):
-                try:
-                    with open(info["primary_dot_env"], "r", encoding="utf-8", errors="ignore") as cur_f:
-                        if cur_f.read() == content:
-                            needs_write = False
-                except Exception:
-                    pass
-            if needs_write:
-                with open(info["primary_dot_env"], "w", encoding="utf-8") as f:
-                    f.write(content)
-        except Exception as e:
-            logger.error(f"Error updating local .env for {info['name']}: {e}")
+    # 3. Always ensure physical .env in ALL project directories exists and is updated!
+    if merged_env:
+        content = "\n".join([f"{k}={v}" for k, v in sorted(merged_env.items())]) + "\n"
+        target_dirs = info.get("all_project_dirs", [info["project_dir"]])
+        for td in target_dirs:
+            try:
+                target_dot_env = os.path.join(td, ".env")
+                needs_write = True
+                if os.path.exists(target_dot_env):
+                    try:
+                        with open(target_dot_env, "r", encoding="utf-8", errors="ignore") as cur_f:
+                            if cur_f.read() == content:
+                                needs_write = False
+                    except Exception:
+                        pass
+                if needs_write:
+                    os.makedirs(td, exist_ok=True)
+                    with open(target_dot_env, "w", encoding="utf-8") as f:
+                        f.write(content)
+                dotless = os.path.join(td, "env")
+                if os.path.exists(dotless):
+                    try:
+                        with open(dotless, "r", encoding="utf-8", errors="ignore") as cur_f:
+                            if cur_f.read() != content:
+                                with open(dotless, "w", encoding="utf-8") as f:
+                                    f.write(content)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Error updating local .env in {td}: {e}")
 
     return merged_env
 
@@ -2359,10 +2448,20 @@ def write_script_env(py_filename, env_dict):
     try:
         content = "\n".join([f"{k}={v}" for k, v in sorted(env_dict.items())]) + "\n"
         
-        # 1. Write to physical .env in the project directory
-        os.makedirs(os.path.dirname(info["primary_dot_env"]), exist_ok=True)
-        with open(info["primary_dot_env"], "w", encoding="utf-8") as f:
-            f.write(content)
+        # 1. Write to physical .env in ALL project directories (project root AND entry subfolder)
+        target_dirs = info.get("all_project_dirs", [info["project_dir"]])
+        for td in target_dirs:
+            try:
+                os.makedirs(td, exist_ok=True)
+                target_dot_env = os.path.join(td, ".env")
+                with open(target_dot_env, "w", encoding="utf-8") as f:
+                    f.write(content)
+                dotless = os.path.join(td, "env")
+                if os.path.exists(dotless):
+                    with open(dotless, "w", encoding="utf-8") as f:
+                        f.write(content)
+            except Exception as e:
+                logger.error(f"Error writing .env in {td}: {e}")
             
         # 2. Also write to secondary <stem>.env if distinct
         if info["secondary_env"] and info["secondary_env"] != info["primary_dot_env"]:
@@ -2519,7 +2618,13 @@ def purge_project_or_script_completely(target_name, exclude_paths=None):
         os.path.join(WORKSPACE_DIR, f"{clean_target}.env"),
         os.path.join(WORKSPACE_DIR, f"{base_stem}.env"),
         os.path.join(WORKSPACE_DIR, f"{slug}.env"),
+        os.path.join(SCRIPTS_DIR, proj_name, "env"),
+        os.path.join(SCRIPTS_DIR, clean_target, "env"),
     ]
+    for td in info.get("all_project_dirs", []):
+        all_env_paths.append(os.path.join(td, ".env"))
+        all_env_paths.append(os.path.join(td, "env"))
+        all_env_paths.append(os.path.join(td, f"{base_stem}.env"))
     for ef in set(all_env_paths):
         if ef and os.path.exists(ef) and not is_excluded(ef):
             try:
@@ -4402,7 +4507,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 fp = os.path.join(root, f)
                 if "requirements" in f.lower() and f.endswith(".txt"):
                     found_reqs.append(fp)
-                elif f.endswith(".env") or f == ".env":
+                elif f.endswith(".env") or f == ".env" or f == "env":
                     found_envs.append(fp)
                     
         req_count = 0
@@ -4426,6 +4531,9 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                             clean_k, clean_v = k.strip(), v.strip().strip("'\"")
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
+                if os.path.basename(ef) == "env":
+                    try: os.remove(ef)
+                    except Exception: pass
                 if parsed:
                     curr_env = read_script_env(info["name"])
                     curr_env.update(parsed)
@@ -4531,7 +4639,7 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                 fp = os.path.join(root, f)
                 if "requirements" in f.lower() and f.endswith(".txt"):
                     found_reqs.append(fp)
-                elif f.endswith(".env") or f == ".env":
+                elif f.endswith(".env") or f == ".env" or f == "env":
                     found_envs.append(fp)
                     
         req_count = 0
@@ -4555,6 +4663,9 @@ def handle_callback_query(callback_id, chat_id, user_id, message_id, data):
                             clean_k, clean_v = k.strip(), v.strip().strip("'\"")
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
+                if os.path.basename(ef) == "env":
+                    try: os.remove(ef)
+                    except Exception: pass
                 if parsed:
                     write_script_env(info["name"], parsed)
                     env_count += len(parsed)
@@ -5267,7 +5378,7 @@ def handle_document_upload(chat_id, user_id, doc):
                 fp = os.path.join(root, f)
                 if "requirements" in f.lower() and f.endswith(".txt"):
                     found_reqs.append(fp)
-                elif f.endswith(".env") or f == ".env":
+                elif f.endswith(".env") or f == ".env" or f == "env":
                     found_envs.append(fp)
 
         # Auto-Install Requirements into this project's isolated virtualenv
@@ -5296,6 +5407,9 @@ def handle_document_upload(chat_id, user_id, doc):
                             clean_v = v.strip().strip("'\"")
                             if clean_k and clean_v:
                                 parsed[clean_k] = clean_v
+                if os.path.basename(ef) == "env":
+                    try: os.remove(ef)
+                    except Exception: pass
                 if parsed:
                     curr_env = read_script_env(info["name"])
                     curr_env.update(parsed)

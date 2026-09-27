@@ -3,6 +3,10 @@
 .env
 scripts/**/.env
 scripts/**/*.env
+env
+**/env
+scripts/**/env
+scripts/**/**/env
 __pycache__/
 *.pyc
 .pytest_cache/
