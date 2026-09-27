@@ -329,7 +329,10 @@ def download_tg_file(file_id, destination_path):
         url = f"{TG_BASE_URL}/getFile?file_id={file_id}"
         resp = requests.get(url, timeout=10).json()
         if not resp.get("ok"):
-            return False, "Could not retrieve file path from Telegram."
+            err_msg = resp.get("description", "Could not retrieve file path from Telegram.")
+            if "too big" in err_msg.lower():
+                err_msg += " (Telegram Bot API has a 20MB file limit for bots)."
+            return False, err_msg
         
         file_path = resp["result"]["file_path"]
         download_url = f"https://api.telegram.org/file/bot{TG_BOT_TOKEN}/{file_path}"
