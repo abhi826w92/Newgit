@@ -1,7 +1,7 @@
 {
   "developer": {
-    "avatar": "/devlogo.png",
-    "avatar_url": "https://i.ibb.co/p6cxF7Fs/devlogo.jpg",
+    "avatar": "devlogo.png",
+    "avatar_url": "devlogo.png",
     "bio": "Crafting fast, private, and powerful mobile apps, web applications, and open-source utilities. Explore my work, join our community, and get in touch!",
     "handle": "@R3V_X",
     "name": "R3V_X",
@@ -170,21 +170,21 @@
     {
       "badge": "NEW",
       "category": "Apps",
-      "changelog": "test",
+      "changelog": "Latest widget sync enhancements & bug fixes",
       "description": "WatchHub connects your smartwatch directly with cloud widgets and real-time syncing.",
-      "developer": "test",
+      "developer": "R3V_X",
       "downloadUrl": "https://github.com/myreleasesrpo0272/appstore/releases/download/v1.6.00/signed.apk",
-      "downloads": "test",
+      "downloads": "1.2K+",
       "featured": false,
       "icon": "https://i.ibb.co/LXCLwySg/file-447.jpg",
       "id": "aab1b445",
       "logo": "https://i.ibb.co/LXCLwySg/file-447.jpg",
       "name": "WatchHub",
-      "order": "test",
+      "order": "1",
       "pinned": true,
       "pinnedOrder": 1,
-      "priority": "test",
-      "rating": "test",
+      "priority": "high",
+      "rating": "4.8",
       "screenshots": [
         "https://i.ibb.co/VccFmS2k/shot-1788248216.jpg",
         "https://i.ibb.co/XfbTpkNK/shot-1788248223.jpg",
@@ -197,10 +197,10 @@
         "https://i.ibb.co/chFjVZHH/shot-1788248311.jpg"
       ],
       "size": "0.95 MB",
-      "sourceUrl": "test",
-      "status": "test",
+      "sourceUrl": "https://github.com/v54087912-collab",
+      "status": "active",
       "tagline": "Track watch faces, manage custom widgets",
-      "trending": "test",
+      "trending": "true",
       "type": "app",
       "updatedDate": "2026-09-22",
       "version": "v1.6.01",
@@ -379,6 +379,32 @@
       "type": "opensource",
       "updatedDate": "2026-09-05",
       "version": "v2.5"
+    },
+    {
+      "badge": "",
+      "category": "Web",
+      "description": "•All Bug and Errors Fixed \n•Login and Signup Error Fixed\n•New Features Added \n•New Python Libraries Added\n•Ai Timeout Bug Fixed \n•New AIode Added\n(Chat Mode & Developer Mode)\n•Libraries Downloading and Loading error Fixed \n•New Saved Chats Feature Added \n•And Many More",
+      "downloadUrl": "https://pymob.pages.dev/",
+      "featured": false,
+      "icon": "https://i.ibb.co/tpfGXmDF/file-530.jpg",
+      "id": "8a77cad1",
+      "logo": "https://i.ibb.co/tpfGXmDF/file-530.jpg",
+      "name": "Pymob",
+      "pinned": false,
+      "size": "4.0 MB",
+      "sourceUrl": "",
+      "tagline": "Designed especially for students who want to learn Python programming but don’t own a PC or laptop",
+      "type": "web",
+      "updatedDate": "2026-10-07",
+      "version": "v1.0.0",
+      "webUrl": "",
+      "screenshots": [
+        "https://i.ibb.co/LdFR9dRw/file-531.jpg",
+        "https://i.ibb.co/wXzYrNr/file-532.jpg",
+        "https://i.ibb.co/rGv6rqMn/file-533.jpg",
+        "https://i.ibb.co/xKspMSNJ/file-534.jpg",
+        "https://i.ibb.co/ZRMP1PQm/file-535.jpg"
+      ]
     }
   ]
 }
