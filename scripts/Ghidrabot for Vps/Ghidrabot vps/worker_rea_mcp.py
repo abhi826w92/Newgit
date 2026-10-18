@@ -352,7 +352,7 @@ def run_automated_recon(target_file: Path, workdir: Path, seen_files: set):
         tg_send_message("✅ <b>[Recon 1/4 Complete]</b> Android DEX file structure verified.")
     else:
         # Generic binary (ELF / PE / Mach-O)
-        rizin_bin = shutil.which("rizin") or "/usr/local/bin/rizin"
+        rizin_bin = shutil.which("rizin") or ("/usr/local/rizin" if Path("/usr/local/rizin").exists() else "/usr/local/bin/rizin")
         headers_file = recon_dir / "01_Binary_Headers.txt"
         try:
             res = subprocess.run(
@@ -369,7 +369,7 @@ def run_automated_recon(target_file: Path, workdir: Path, seen_files: set):
 
     # ---------------- Phase 2: Native Symbols & Disassembly ----------------
     tg_send_message("⚡ <b>[Recon 2/4] Analyzing Native Code & Symbols with Rizin...</b>")
-    rizin_bin = shutil.which("rizin") or "/usr/local/bin/rizin"
+    rizin_bin = shutil.which("rizin") or ("/usr/local/rizin" if Path("/usr/local/rizin").exists() else "/usr/local/bin/rizin")
 
     so_files = []
     if is_apk:
@@ -575,6 +575,25 @@ def main():
         except Exception as e:
             log.warning("Could not copy to /tmp: %s", e)
 
+    # Patch Ghidra application.properties version to 12.1.4 for REA compatibility
+    ghidra_prop = Path("/opt/ghidra/Ghidra/application.properties")
+    if ghidra_prop.exists():
+        try:
+            content = ghidra_prop.read_text(encoding="utf-8")
+            new_content = re.sub(r"application\.version=[^\r\n]+", "application.version=12.1.4", content)
+            ghidra_prop.write_text(new_content, encoding="utf-8")
+            log.info("Patched Ghidra application.properties to version 12.1.4")
+        except Exception as e:
+            log.warning("Could not patch Ghidra properties: %s", e)
+
+    # Ensure Rizin symlink exists if extracted into /usr/local/rizin
+    if Path("/usr/local/rizin").exists() and not Path("/usr/local/bin/rizin").exists():
+        try:
+            Path("/usr/local/bin/rizin").symlink_to("/usr/local/rizin")
+            log.info("Symlinked /usr/local/rizin to /usr/local/bin/rizin")
+        except Exception as e:
+            log.warning("Could not symlink rizin: %s", e)
+
     # Prepare environment for REA
     rea_env = os.environ.copy()
     rea_env["PORT"] = "8080"
@@ -586,7 +605,7 @@ def main():
     rea_env["REA_WORKSPACE"] = str(workdir)
     rea_env["GHIDRA_INSTALL_DIR"] = "/opt/ghidra"
     rea_env["GHIDRA_HOME"] = "/opt/ghidra"
-    rea_env["PATH"] = f"/usr/local/bin:/usr/bin:/bin:/opt/ghidra/support:/opt/jadx/bin:{os.environ.get('PATH', '')}"
+    rea_env["PATH"] = f"/usr/local/bin:/usr/local:/usr/bin:/bin:/opt/ghidra/support:/opt/jadx/bin:{os.environ.get('PATH', '')}"
 
     if target_file and target_file.exists():
         rea_env["REA_INITIAL_TARGET"] = str(target_file)
