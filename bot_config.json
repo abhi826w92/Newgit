@@ -4,7 +4,8 @@
     7251749429
   ],
   "active_scripts": [
-    "mystore-bot-vps/main.py"
+    "mystore-bot-vps/main.py",
+    "Ghidrabot for Vps/Ghidrabot vps/bot.py"
   ],
   "manually_stopped_scripts": [
     "mystore-bot-vps"
