@@ -22,7 +22,7 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client
 from pyrogram.raw import functions
-from pyrogram.errors import FloodWait, SessionPasswordNeeded
+from pyrogram.errors import FloodWait, SessionPasswordNeeded, PeerFlood, ChatWriteForbidden, UserBannedInChannel, AuthKeyUnregistered, UserDeactivated, MessageIdInvalid
 
 # Load .env
 if os.path.exists(".env"):
@@ -58,10 +58,17 @@ DB_CIPHER_KEY = hashlib.pbkdf2_hmac(
     32
 )
 
+def make_pyaes_counter(iv_bytes):
+    val = int.from_bytes(iv_bytes, byteorder="big")
+    try:
+        return pyaes.Counter(initial_value=val)
+    except TypeError:
+        return pyaes.Counter(val)
+
 def encrypt_db_payload(plain_dict):
     raw_bytes = json.dumps(plain_dict).encode("utf-8")
     iv = os.urandom(16)
-    counter = pyaes.Counter(initial_value=int.from_bytes(iv, byteorder="big"))
+    counter = make_pyaes_counter(iv)
     aes = pyaes.AESModeOfOperationCTR(DB_CIPHER_KEY, counter=counter)
     ciphertext = aes.encrypt(raw_bytes)
     tag = hmac.new(DB_CIPHER_KEY, iv + ciphertext, hashlib.sha256).digest()
@@ -83,7 +90,7 @@ def decrypt_db_payload(packed):
     if not hmac.compare_digest(tag, expected_tag):
         raise ValueError("Database HMAC verification failed! File corrupted or encryption key mismatch.")
 
-    counter = pyaes.Counter(initial_value=int.from_bytes(iv, byteorder="big"))
+    counter = make_pyaes_counter(iv)
     aes = pyaes.AESModeOfOperationCTR(DB_CIPHER_KEY, counter=counter)
     decrypted_bytes = aes.decrypt(ciphertext)
     return json.loads(decrypted_bytes.decode("utf-8"))
@@ -96,7 +103,14 @@ def load_db():
             raw = json.load(f)
 
         if isinstance(raw, dict) and raw.get("enc") is True:
-            return decrypt_db_payload(raw)
+            data = decrypt_db_payload(raw)
+            # Maintain backup
+            try:
+                with open("db.json.bak", "w") as bf:
+                    json.dump(raw, bf)
+            except Exception:
+                pass
+            return data
 
         # Legacy plain-text JSON detected -> automatically migrate to AES-256 encrypted storage!
         print("[SECURITY] Plain-text db.json detected. Migrating to AES-256 encrypted storage...")
@@ -104,13 +118,23 @@ def load_db():
         return raw
     except Exception as e:
         print(f"[SECURITY] Error reading db.json: {e}")
+        if os.path.exists("db.json.bak"):
+            try:
+                with open("db.json.bak", "r") as bf:
+                    bak_raw = json.load(bf)
+                print("[SECURITY] Restored db.json from backup.")
+                return decrypt_db_payload(bak_raw)
+            except Exception:
+                pass
         return {}
 
 def save_db(data):
     try:
         encrypted_dict = encrypt_db_payload(data)
-        with open("db.json", "w") as f:
+        tmp_path = "db.json.tmp"
+        with open(tmp_path, "w") as f:
             json.dump(encrypted_dict, f, indent=2)
+        os.replace(tmp_path, "db.json")
     except Exception as e:
         print(f"[SECURITY] Error encrypting and saving db.json: {e}")
 
@@ -128,13 +152,15 @@ user_task_info = {}         # user_id -> dict for live progress status
 
 CONTENT_TYPE_LABELS = {
     "all": "All Content 📁",
+    "media": "Media Only (No Text) 🎬🖼️",
     "video": "Videos Only 🎬",
     "photo": "Photos Only 🖼️",
     "document": "Documents/Files 📄",
-    "text": "Text Only 📝"
+    "text": "Text Only 📝",
+    "text_extract": "Extract Captions as Text 📝⚡"
 }
 
-CONTENT_TYPE_CYCLE = ["all", "video", "photo", "document", "text"]
+CONTENT_TYPE_CYCLE = ["all", "media", "video", "photo", "document", "text", "text_extract"]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEDUP_DB_PATH = os.path.join(BASE_DIR, "dedup.db")
@@ -147,6 +173,8 @@ user_dedup_cache = {}  # user_id -> set(file_hash)
 def init_dedup_db():
     conn = sqlite3.connect(DEDUP_DB_PATH)
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS copied_hashes (
             user_id INTEGER,
@@ -257,6 +285,8 @@ def clear_user_dedup_cache(user_id):
 def init_stats_db():
     conn = sqlite3.connect(STATS_DB_PATH)
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS job_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -281,8 +311,204 @@ def init_stats_db():
             PRIMARY KEY (user_id, date_str)
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS job_checkpoints (
+            user_id INTEGER PRIMARY KEY,
+            src INTEGER,
+            dst INTEGER,
+            src_title TEXT,
+            dst_title TEXT,
+            total INTEGER,
+            copied_count INTEGER,
+            current_index INTEGER,
+            skipped_dup INTEGER,
+            range_label TEXT,
+            content_type TEXT,
+            signature TEXT,
+            is_protected INTEGER,
+            messages_json TEXT,
+            msg_hash_json TEXT,
+            created_at REAL,
+            updated_at REAL
+        )
+    """)
     conn.commit()
     conn.close()
+
+# ==================== CHECKPOINT ENGINE (Fix 4) ====================
+
+# ==================== ACCOUNT HEALTH & SAFETY ENGINE (Tier 1 & 2) ====================
+
+user_floodwait_timestamps = {}  # user_id -> list of float timestamps
+user_peerflood_until = {}       # user_id -> timestamp (float)
+
+def record_floodwait_event(user_id):
+    now = time.time()
+    if user_id not in user_floodwait_timestamps:
+        user_floodwait_timestamps[user_id] = []
+    user_floodwait_timestamps[user_id] = [t for t in user_floodwait_timestamps[user_id] if now - t <= 3600]
+    user_floodwait_timestamps[user_id].append(now)
+
+def get_account_health(user_id):
+    now = time.time()
+    pf_until = user_peerflood_until.get(user_id, 0)
+    if now < pf_until:
+        rem_hrs = round((pf_until - now) / 3600, 1)
+        return "🔴 RESTRICTED (PeerFlood)", f"Rest for {rem_hrs}h remaining", "red"
+
+    fw_list = [t for t in user_floodwait_timestamps.get(user_id, []) if now - t <= 3600]
+    user_floodwait_timestamps[user_id] = fw_list
+    fw_count = len(fw_list)
+
+    if fw_count >= 3:
+        return f"🔴 HOT ({fw_count} FloodWaits/1h)", "Cooling down. Rest required!", "red"
+    elif fw_count in (1, 2):
+        return f"🟡 WARM ({fw_count} FloodWait)", "Adaptive safety pacing active", "yellow"
+    else:
+        return "🟢 HEALTHY", "Optimal safety standing", "green"
+
+def mark_peerflood_blocked(user_id, hours=24):
+    user_peerflood_until[user_id] = time.time() + (hours * 3600)
+
+async def run_preflight_checks(u_client, user_id, chat_id, src, dst):
+    """
+    Pre-flight safety validation before copying starts:
+    1. Checks if src == dst (infinite loop prevention)
+    2. Checks Account Health Lock (PeerFlood / 3+ FloodWaits)
+    3. Checks source chat existence & protection status
+    4. Checks destination write permissions
+    """
+    try:
+        s_id = int(src) if str(src).lstrip('-').isdigit() else src
+        d_id = int(dst) if str(dst).lstrip('-').isdigit() else dst
+        if s_id == d_id:
+            return False, "❌ <b>Source aur Destination identical hain!</b> Infinite loop se bachne ke liye ye blocked hai.", False
+    except Exception:
+        pass
+
+    status_label, reason, color = get_account_health(user_id)
+    if color == "red":
+        return False, f"🛑 <b>Pre-flight Safety Block:</b>\nAccount health is <b>{status_label}</b>: {reason}\n\nAccount ko Telegram ban se bachane ke liye abhi copy task blocked hai. Kripya account ko thodi der rest dein.", False
+
+    is_protected = False
+    try:
+        src_chat = await u_client.get_chat(src)
+        is_protected = bool(getattr(src_chat, "has_protected_content", False))
+    except Exception as e:
+        return False, f"❌ <b>Source chat access error:</b> {e}\nCheck if user account has joined this channel.", False
+
+    try:
+        dst_chat = await u_client.get_chat(dst)
+        perms = getattr(dst_chat, "permissions", None)
+        if perms and not getattr(perms, "can_send_messages", True):
+            return False, "❌ <b>Destination write access missing!</b> Is destination chat mein send messages permission off hai.", is_protected
+    except Exception as e:
+        return False, f"❌ <b>Destination chat access error:</b> {e}\nCheck if destination exists and user is a member/admin.", is_protected
+
+    return True, "Pre-flight checks passed", is_protected
+
+
+def save_checkpoint(user_id, src, dst, src_title, dst_title, total, copied_count, current_index, skipped_dup, range_label, content_type, signature, is_protected, messages, msg_hash_map):
+    try:
+        now = time.time()
+        msgs_json = json.dumps(messages)
+        hash_json = json.dumps(msg_hash_map)
+        is_prot_int = 1 if is_protected else 0
+        sig_str = json.dumps(signature) if isinstance(signature, dict) else (signature or "")
+
+        conn = sqlite3.connect(STATS_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO job_checkpoints (
+                user_id, src, dst, src_title, dst_title, total, copied_count, current_index, skipped_dup,
+                range_label, content_type, signature, is_protected, messages_json, msg_hash_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                src = excluded.src,
+                dst = excluded.dst,
+                src_title = excluded.src_title,
+                dst_title = excluded.dst_title,
+                total = excluded.total,
+                copied_count = excluded.copied_count,
+                current_index = excluded.current_index,
+                skipped_dup = excluded.skipped_dup,
+                range_label = excluded.range_label,
+                content_type = excluded.content_type,
+                signature = excluded.signature,
+                is_protected = excluded.is_protected,
+                messages_json = excluded.messages_json,
+                msg_hash_json = excluded.msg_hash_json,
+                updated_at = excluded.updated_at
+        """, (
+            user_id, src, dst, src_title, dst_title, total, copied_count, current_index, skipped_dup,
+            range_label, content_type, sig_str, is_prot_int, msgs_json, hash_json, now, now
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[CHECKPOINT] Error saving checkpoint: {e}")
+
+def get_checkpoint(user_id):
+    try:
+        conn = sqlite3.connect(STATS_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT user_id, src, dst, src_title, dst_title, total, copied_count, current_index, skipped_dup,
+                   range_label, content_type, signature, is_protected, messages_json, msg_hash_json, created_at, updated_at
+            FROM job_checkpoints WHERE user_id = ?
+        """, (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "user_id": row[0],
+            "src": row[1],
+            "dst": row[2],
+            "src_title": row[3],
+            "dst_title": row[4],
+            "total": row[5],
+            "copied_count": row[6],
+            "current_index": row[7],
+            "skipped_dup": row[8],
+            "range_label": row[9],
+            "content_type": row[10],
+            "signature": row[11],
+            "is_protected": bool(row[12]),
+            "messages_json": row[13],
+            "msg_hash_json": row[14],
+            "created_at": row[15],
+            "updated_at": row[16]
+        }
+    except Exception as e:
+        print(f"[CHECKPOINT] Error fetching checkpoint: {e}")
+        return None
+
+def update_checkpoint_progress(user_id, copied_count, current_index, skipped_dup):
+    try:
+        now = time.time()
+        conn = sqlite3.connect(STATS_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE job_checkpoints
+            SET copied_count = ?, current_index = ?, skipped_dup = ?, updated_at = ?
+            WHERE user_id = ?
+        """, (copied_count, current_index, skipped_dup, now, user_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[CHECKPOINT] Error updating checkpoint progress: {e}")
+
+def delete_checkpoint(user_id):
+    try:
+        conn = sqlite3.connect(STATS_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM job_checkpoints WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        print(f"[CHECKPOINT] Cleared checkpoint for user {user_id}")
+    except Exception as e:
+        print(f"[CHECKPOINT] Error clearing checkpoint: {e}")
 
 def record_job_stats(user_id, src_title, dst_title, total, copied, skipped_dup, failed, duration_sec):
     try:
@@ -502,6 +728,8 @@ def build_pyrogram_proxy(px):
     return arg
 
 async def switch_user_proxy(user_id, proxy_id_or_none):
+    if active_tasks.get(user_id, False):
+        return False, "❌ Copy task currently running! Pehle task ko Stop karein, phir proxy switch karein."
     uid = str(user_id)
     if uid not in DB:
         return False, "User not found in database"
@@ -670,22 +898,116 @@ def parse_date_range(text):
         return None
     return None
 
+def has_caption_modifications(settings):
+    """Returns True if any Category 1 caption/text manipulation rule is active."""
+    if not settings:
+        return False
+    if settings.get("strip_caption", False):
+        return True
+    if settings.get("extract_text", False) or settings.get("content_type") == "text_extract":
+        return True
+    if settings.get("clean_links", False):
+        return True
+    if settings.get("clean_mentions", False):
+        return True
+    if settings.get("clean_hashtags", False):
+        return True
+    if settings.get("find_replace_rules"):
+        return True
+    if settings.get("header"):
+        return True
+    if settings.get("footer") or settings.get("signature"):
+        return True
+    return False
+
+def process_caption_and_text(raw_text, settings=None, src_title="", is_media=False):
+    """
+    Applies the full Category 1 manipulation pipeline:
+    1. Strip all text check (if is_media and strip_caption) -> returns ""
+    2. Sequential Find & Replace rules
+    3. Auto-cleaning (links, mentions, hashtags)
+    4. Header & Footer templates ({channel} replacement & length safety limit)
+    """
+    if not settings:
+        settings = {}
+
+    if is_media and settings.get("strip_caption", False):
+        return ""
+
+    text = raw_text or ""
+
+    # 2. Sequential Find & Replace rules
+    rules = settings.get("find_replace_rules") or []
+    for r in rules:
+        find_val = r.get("find", "")
+        if not find_val:
+            continue
+        repl_val = r.get("replace", "")
+        try:
+            pattern = re.compile(re.escape(find_val), re.IGNORECASE)
+            text = pattern.sub(repl_val, text)
+        except Exception:
+            text = text.replace(find_val, repl_val)
+
+    # 3. Auto-cleaning
+    if settings.get("clean_links", False):
+        text = re.sub(r'(?:https?://|www\.|t\.me/)[^\s]+', '', text)
+    if settings.get("clean_mentions", False):
+        text = re.sub(r'@[a-zA-Z0-9_]+', '', text)
+    if settings.get("clean_hashtags", False):
+        text = re.sub(r'#[a-zA-Z0-9_\u0600-\u06FF]+', '', text)
+
+    # Normalize whitespace & excess blank lines
+    text = re.sub(r'[ \t]+', ' ', text)
+    lines = [l.strip() for l in text.splitlines()]
+    text = "\n".join(lines)
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+
+    # 4. Prepend Header & Append Footer / Signature
+    header = settings.get("header")
+    footer = settings.get("footer") or settings.get("signature")
+
+    if header:
+        header = header.replace("{channel}", src_title).strip()
+    if footer:
+        footer = footer.replace("{channel}", src_title).strip()
+
+    max_len = 1024 if is_media else 4096
+
+    parts = []
+    if header:
+        parts.append(header)
+    if text:
+        parts.append(text)
+    if footer:
+        parts.append(footer)
+
+    final_text = "\n\n".join(parts).strip()
+
+    # Length safety check & middle truncation preserving Header & Footer
+    if len(final_text) > max_len:
+        h_len = (len(header) + 2) if header else 0
+        f_len = (len(footer) + 2) if footer else 0
+        avail = max_len - h_len - f_len - 3
+        if avail > 10 and text:
+            text = text[:avail].rstrip() + "..."
+            parts = []
+            if header:
+                parts.append(header)
+            if text:
+                parts.append(text)
+            if footer:
+                parts.append(footer)
+            final_text = "\n\n".join(parts).strip()
+        else:
+            final_text = final_text[:max_len]
+
+    return final_text
+
 def apply_signature(caption, signature_template, src_title):
     if not signature_template:
         return caption or ""
-    sig = signature_template.replace("{channel}", src_title).strip()
-    if not sig:
-        return caption or ""
-
-    if caption:
-        full = f"{caption}\n\n{sig}"
-    else:
-        full = sig
-
-    if len(full) > 1024:
-        avail = 1024 - len(sig) - 5
-        full = f"{(caption or '')[:avail]}...\n\n{sig}"
-    return full
+    return process_caption_and_text(caption, {"footer": signature_template}, src_title, is_media=True)
 
 async def resolve_chat(u_client, target_type, target_val):
     try:
@@ -729,16 +1051,26 @@ def get_user_copy_settings(user_id):
     if user_id not in user_auth_data:
         user_auth_data[user_id] = {}
     if "copy_settings" not in user_auth_data[user_id]:
-        user_auth_data[user_id]["copy_settings"] = {
-            "content_type": "all",
-            "skip_service": True,
-            "skip_forwarded": False,
-            "skip_duplicates": False,
-            "signature": None
-        }
-    if "skip_duplicates" not in user_auth_data[user_id]["copy_settings"]:
-        user_auth_data[user_id]["copy_settings"]["skip_duplicates"] = False
-    return user_auth_data[user_id]["copy_settings"]
+        user_auth_data[user_id]["copy_settings"] = {}
+
+    settings = user_auth_data[user_id]["copy_settings"]
+    settings.setdefault("content_type", "all")
+    settings.setdefault("skip_service", True)
+    settings.setdefault("skip_forwarded", False)
+    settings.setdefault("skip_duplicates", False)
+    settings.setdefault("drop_forward_tag", True)   # Feature 5: True = Clean (No Tag), False = Keep Tag
+    settings.setdefault("strip_caption", False)     # Feature 1: Strip all captions from media
+    settings.setdefault("extract_text", False)      # Feature 2: Extract caption as text only
+    settings.setdefault("clean_links", False)       # Feature 3: Remove links/URLs
+    settings.setdefault("clean_mentions", False)    # Feature 3: Remove @mentions
+    settings.setdefault("clean_hashtags", False)    # Feature 3: Remove #hashtags
+    settings.setdefault("find_replace_rules", [])   # Feature 4: Sequential find & replace rules
+    settings.setdefault("header", None)             # Feature 6: Prepend header
+    settings.setdefault("footer", None)             # Feature 6: Append footer
+    settings.setdefault("signature", None)
+    if settings.get("signature") and not settings.get("footer"):
+        settings["footer"] = settings["signature"]
+    return settings
 
 # Cache user dialogs for fast pagination & search
 async def refresh_user_dialogs(user_id):
@@ -865,6 +1197,7 @@ async def send_dashboard(chat_id, user_id, message_id=None):
 
         is_running = active_tasks.get(user_id, False)
         status_text = "🟢 Active Copying..." if is_running else "⚪ Idle / Ready"
+        health_label, health_desc, health_color = get_account_health(user_id)
 
         active_px = get_user_active_proxy(user_id)
         if active_px:
@@ -878,12 +1211,26 @@ async def send_dashboard(chat_id, user_id, message_id=None):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>Account:</b> {name} ({username})\n"
             f"📱 <b>Phone:</b> +{phone}\n"
-            f"📊 <b>Status:</b> {status_text}\n"
+            f"🛡️ <b>Account Health:</b> {health_label}\n"
+            f"📊 <b>Task Status:</b> {status_text}\n"
             f"🌐 <b>Proxy:</b> {proxy_display}\n"
-            f"⚡ <b>Engine:</b> 100× MTProto Batching / Parallel (Active)\n"
+            f"⚡ <b>Engine:</b> 100× MTProto / Dynamic Safety Limiter\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "Choose an option below to start:"
         )
+
+        cp = get_checkpoint(user_id)
+        if cp and not is_running:
+            pct = round((cp['copied_count'] / max(cp['total'], 1)) * 100, 1)
+            text += (
+                "\n\n⚠️ <b>Unfinished Copy Job Detected!</b>\n"
+                f"🔹 <b>From:</b> {cp['src_title']}\n"
+                f"🔸 <b>To:</b> {cp['dst_title']}\n"
+                f"📊 <b>Progress:</b> <b>{cp['copied_count']}/{cp['total']}</b> messages ({pct}%)\n"
+                "Tap <b>Resume Copying</b> to continue from where you stopped:"
+            )
+            kb.add(InlineKeyboardButton(f"▶️ Resume Copying ({cp['copied_count']}/{cp['total']})", callback_data="resume_checkpoint"))
+            kb.add(InlineKeyboardButton("🗑️ Discard Saved Checkpoint", callback_data="discard_checkpoint"))
 
         kb.add(InlineKeyboardButton("🚀 Start New Copy", callback_data="flow_pick_src"))
         if is_running:
@@ -970,17 +1317,40 @@ async def show_copy_settings(chat_id, user_id, message_id=None):
     skip_dup = settings.get("skip_duplicates", False)
     dup_icon = "✅ YES (Skip)" if skip_dup else "⬜ NO (Copy All)"
     dedup_count = get_user_dedup_count(user_id)
-    sig = settings.get("signature")
-    sig_display = f"<code>{sig[:30]}...</code>" if sig else "None (Off)"
+
+    drop_tag = settings.get("drop_forward_tag", True)
+    tag_label = "🚫 Clean (No Forward Tag)" if drop_tag else "🏷️ Keep Forward Tag"
+
+    mods_active = []
+    if settings.get("strip_caption"):
+        mods_active.append("🚫 Strip All")
+    if settings.get("extract_text"):
+        mods_active.append("📄 Extract Text Only")
+    if settings.get("clean_links"):
+        mods_active.append("🔗 Links Cleaned")
+    if settings.get("clean_mentions"):
+        mods_active.append("👤 Mentions Cleaned")
+    if settings.get("clean_hashtags"):
+        mods_active.append("#️⃣ Tags Cleaned")
+    rules = settings.get("find_replace_rules", [])
+    if rules:
+        mods_active.append(f"🔄 {len(rules)} Replace Rules")
+    if settings.get("header"):
+        mods_active.append("🔝 Header")
+    if settings.get("footer") or settings.get("signature"):
+        mods_active.append("🔚 Footer")
+
+    caption_summary = ", ".join(mods_active) if mods_active else "Original Captions (Keep)"
 
     text = (
         "⚙️ <b>Step 4/5: Advanced Filters & Options</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Range:</b> {range_cfg.get('label')}\n"
         f"📄 <b>Content Filter:</b> <b>{ctype_label}</b>\n"
+        f"🏷️ <b>Forward Tag:</b> <b>{tag_label}</b>\n"
         f"📦 <b>Skip Forwarded:</b> {fwd_icon}\n"
         f"⚡ <b>Skip Duplicates:</b> {dup_icon} (<code>{dedup_count}</code> indexed)\n"
-        f"✍️ <b>Signature:</b> {sig_display}\n"
+        f"📝 <b>Caption Rules:</b> <b>{caption_summary}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Tap buttons below to toggle options, or tap <b>Continue</b>:"
     )
@@ -988,22 +1358,134 @@ async def show_copy_settings(chat_id, user_id, message_id=None):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(f"📄 Content Filter: {ctype_label}", callback_data="toggle_content_type"))
     kb.row(
-        InlineKeyboardButton(f"📦 Skip Fwd: {fwd_icon}", callback_data="toggle_skip_fwd"),
-        InlineKeyboardButton(f"⚡ Skip Dup: {dup_icon}", callback_data="toggle_skip_dup")
+        InlineKeyboardButton(f"🏷️ Tag: {'Clean' if drop_tag else 'Keep Tag'}", callback_data="toggle_drop_fwd_tag"),
+        InlineKeyboardButton(f"📦 Skip Fwd: {fwd_icon}", callback_data="toggle_skip_fwd")
     )
-    if sig:
-        kb.row(
-            InlineKeyboardButton("✍️ Edit Signature", callback_data="btn_set_sig"),
-            InlineKeyboardButton("🗑️ Remove", callback_data="btn_clear_sig")
-        )
-    else:
-        kb.add(InlineKeyboardButton("✍️ Add Custom Signature", callback_data="btn_set_sig"))
-
+    kb.row(
+        InlineKeyboardButton(f"⚡ Skip Dup: {dup_icon}", callback_data="toggle_skip_dup"),
+        InlineKeyboardButton("📝 Caption & Text Rules ➔", callback_data="flow_caption_rules")
+    )
     kb.add(InlineKeyboardButton("✅ Continue to Review ➔", callback_data="flow_confirm"))
     kb.row(
         InlineKeyboardButton("⬅️ Back to Range", callback_data="flow_pick_range"),
         InlineKeyboardButton("🔄 Reset Defaults", callback_data="reset_settings")
     )
+
+    if message_id:
+        try:
+            return await bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
+    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+# Sub-menu: Category 1 - Caption & Text Customization
+async def show_caption_menu(chat_id, user_id, message_id=None):
+    user_states[user_id] = "CONFIG_CAPTIONS"
+    settings = get_user_copy_settings(user_id)
+
+    strip_cap = settings.get("strip_caption", False)
+    strip_icon = "✅ ON (Stripped)" if strip_cap else "⬜ OFF (Kept)"
+
+    extract_txt = settings.get("extract_text", False) or settings.get("content_type") == "text_extract"
+    extract_icon = "✅ ON (Text Only)" if extract_txt else "⬜ OFF"
+
+    c_links = settings.get("clean_links", False)
+    c_links_icon = "✅ Remove" if c_links else "⬜ Keep"
+
+    c_mentions = settings.get("clean_mentions", False)
+    c_mentions_icon = "✅ Remove" if c_mentions else "⬜ Keep"
+
+    c_tags = settings.get("clean_hashtags", False)
+    c_tags_icon = "✅ Remove" if c_tags else "⬜ Keep"
+
+    rules = settings.get("find_replace_rules", [])
+    header = settings.get("header")
+    footer = settings.get("footer") or settings.get("signature")
+
+    header_disp = f"<code>{header[:25]}...</code>" if header else "None (Off)"
+    footer_disp = f"<code>{footer[:25]}...</code>" if footer else "None (Off)"
+
+    text = (
+        "📝 <b>Caption & Text Customization (Category 1)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🚫 <b>Strip All Captions:</b> {strip_icon}\n"
+        f"   <i>(Media is copied with zero caption/text)</i>\n\n"
+        f"📄 <b>Extract Text Only:</b> {extract_icon}\n"
+        f"   <i>(Extracts captions from media as text without downloading files)</i>\n\n"
+        "🧹 <b>Auto-Clean Spam:</b>\n"
+        f"   • Links / URLs: <b>{c_links_icon}</b>\n"
+        f"   • @Mentions: <b>{c_mentions_icon}</b>\n"
+        f"   • #Hashtags: <b>{c_tags_icon}</b>\n\n"
+        f"🔄 <b>Find & Replace:</b> <b>{len(rules)}</b> active rule(s)\n"
+        f"🔝 <b>Header (Top):</b> {header_disp}\n"
+        f"🔚 <b>Footer (Bottom):</b> {footer_disp}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Tap buttons to configure your rules:"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton(f"🚫 Strip Captions: {strip_icon}", callback_data="toggle_strip_caption"),
+        InlineKeyboardButton(f"📄 Extract Text: {extract_icon}", callback_data="toggle_extract_text")
+    )
+    kb.row(
+        InlineKeyboardButton(f"🔗 Links: {c_links_icon}", callback_data="toggle_clean_links"),
+        InlineKeyboardButton(f"👤 Mentions: {c_mentions_icon}", callback_data="toggle_clean_mentions"),
+        InlineKeyboardButton(f"#️⃣ Tags: {c_tags_icon}", callback_data="toggle_clean_hashtags")
+    )
+    kb.add(InlineKeyboardButton(f"🔄 Find & Replace Rules ({len(rules)}) ➔", callback_data="menu_find_replace"))
+    kb.row(
+        InlineKeyboardButton("🔝 Set Header", callback_data="btn_set_header"),
+        InlineKeyboardButton("🔚 Set Footer", callback_data="btn_set_footer")
+    )
+    if header or footer:
+        kb.row(
+            InlineKeyboardButton("🗑️ Clear Header", callback_data="btn_clear_header"),
+            InlineKeyboardButton("🗑️ Clear Footer", callback_data="btn_clear_footer")
+        )
+    kb.row(
+        InlineKeyboardButton("⬅️ Back to Settings", callback_data="flow_settings"),
+        InlineKeyboardButton("🔄 Reset Caption Rules", callback_data="reset_caption_rules")
+    )
+
+    if message_id:
+        try:
+            return await bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
+    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+# Sub-menu: Find & Replace Rules Screen
+async def show_find_replace_menu(chat_id, user_id, message_id=None):
+    user_states[user_id] = "CONFIG_FIND_REPLACE"
+    settings = get_user_copy_settings(user_id)
+    rules = settings.get("find_replace_rules", [])
+
+    if rules:
+        rule_lines = []
+        for idx, r in enumerate(rules, 1):
+            find_txt = r.get("find", "")
+            repl_txt = r.get("replace", "")
+            repl_disp = f"<code>{repl_txt}</code>" if repl_txt else "<i>[DELETED]</i>"
+            rule_lines.append(f"{idx}. <code>{find_txt}</code> ➔ {repl_disp}")
+        rules_str = "\n".join(rule_lines)
+    else:
+        rules_str = "<i>No replacement rules active yet.</i>"
+
+    text = (
+        "🔄 <b>Find & Replace Rules in Captions</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Rules are applied sequentially to captions and messages:\n\n"
+        f"{rules_str}\n\n"
+        "💡 <b>Tip:</b> Leave replacement blank to remove unwanted words or spam links.\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("➕ Add New Replacement Rule", callback_data="btn_add_find_replace"))
+    if rules:
+        kb.add(InlineKeyboardButton("🗑️ Clear All Rules", callback_data="btn_clear_find_replace"))
+    kb.add(InlineKeyboardButton("⬅️ Back to Caption Rules", callback_data="flow_caption_rules"))
 
     if message_id:
         try:
@@ -1027,8 +1509,29 @@ async def show_confirmation(chat_id, user_id, message_id=None):
     ctype_label = CONTENT_TYPE_LABELS.get(ctype, "All Content")
     skip_fwd = "✅ Yes" if settings.get("skip_forwarded") else "⬜ No"
     skip_dup = "✅ Yes (dedup.db)" if settings.get("skip_duplicates") else "⬜ No"
-    sig = settings.get("signature")
-    sig_summary = "✅ Active" if sig else "None (Off)"
+    drop_tag = settings.get("drop_forward_tag", True)
+    tag_label = "🚫 Clean (No Forward Tag)" if drop_tag else "🏷️ Keep Forward Tag"
+
+    cap_details = []
+    if settings.get("strip_caption"):
+        cap_details.append("🚫 Strip All Captions (Raw Media Only)")
+    if settings.get("extract_text"):
+        cap_details.append("📄 Extract Captions as Text (Skip Media)")
+    if settings.get("clean_links"):
+        cap_details.append("🔗 Links Removed")
+    if settings.get("clean_mentions"):
+        cap_details.append("👤 @Mentions Removed")
+    if settings.get("clean_hashtags"):
+        cap_details.append("#️⃣ #Hashtags Removed")
+    rules = settings.get("find_replace_rules", [])
+    if rules:
+        cap_details.append(f"🔄 {len(rules)} Find/Replace rule(s)")
+    if settings.get("header"):
+        cap_details.append("🔝 Header Template Active")
+    if settings.get("footer") or settings.get("signature"):
+        cap_details.append("🔚 Footer Template Active")
+
+    cap_display = "\n   • " + "\n   • ".join(cap_details) if cap_details else "Original Captions Kept"
 
     text = (
         "📋 <b>Step 5/5: Final Review & Confirmation</b>\n"
@@ -1039,10 +1542,11 @@ async def show_confirmation(chat_id, user_id, message_id=None):
         f"   └ <code>{dst_id}</code>\n\n"
         f"📊 <b>Range:</b> {range_cfg.get('label')}\n"
         f"📄 <b>Content Filter:</b> {ctype_label}\n"
+        f"🏷️ <b>Forward Tag:</b> {tag_label}\n"
         f"📦 <b>Skip Forwarded:</b> {skip_fwd}\n"
         f"⚡ <b>Skip Duplicates:</b> {skip_dup}\n"
-        f"✍️ <b>Custom Signature:</b> {sig_summary}\n"
-        "⚡ <b>Engine:</b> 100× MTProto Batching / Parallel Bypass (6x)\n"
+        f"📝 <b>Caption Rules:</b> {cap_display}\n"
+        "⚡ <b>Engine:</b> 100× MTProto Batching / Caption Bypass (3x)\n"
         "🛡️ <b>Anti-Ban:</b> Tuned Delays & Auto-Breather Active\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Ready to begin? Click <b>Confirm & Start Copying</b> below:"
@@ -1051,8 +1555,9 @@ async def show_confirmation(chat_id, user_id, message_id=None):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("▶️ Confirm & Start Copying", callback_data="confirm_copy"))
     kb.row(
-        InlineKeyboardButton("📊 Change Range", callback_data="flow_pick_range"),
-        InlineKeyboardButton("⚙️ Change Settings", callback_data="flow_settings")
+        InlineKeyboardButton("📊 Range", callback_data="flow_pick_range"),
+        InlineKeyboardButton("⚙️ Settings", callback_data="flow_settings"),
+        InlineKeyboardButton("📝 Captions", callback_data="flow_caption_rules")
     )
     kb.add(InlineKeyboardButton("❌ Cancel Job", callback_data="nav_home"))
 
@@ -1272,6 +1777,10 @@ async def show_help(chat_id, message_id=None):
     await bot.send_message(chat_id, help_text, reply_markup=kb, parse_mode="HTML")
 
 async def perform_logout(chat_id, user_id, message_id=None):
+    if active_tasks.get(user_id, False):
+        active_tasks[user_id] = False
+        await asyncio.sleep(2.0)
+
     if user_id in user_clients:
         try:
             await user_clients[user_id].log_out()
@@ -1623,32 +2132,177 @@ async def toggle_skip_fwd_cb(call):
     await bot.answer_callback_query(call.id, f"Skip Forwarded: {status}")
     await show_copy_settings(call.message.chat.id, user_id, call.message.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "btn_set_sig")
-async def btn_set_sig_cb(call):
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_drop_fwd_tag")
+async def toggle_drop_fwd_tag_cb(call):
     user_id = call.from_user.id
-    user_states[user_id] = "WAIT_SIGNATURE"
+    settings = get_user_copy_settings(user_id)
+    settings["drop_forward_tag"] = not settings.get("drop_forward_tag", True)
+    tag_status = "Clean (No Tag)" if settings["drop_forward_tag"] else "Keep Original Tag"
+    await bot.answer_callback_query(call.id, f"Forward Tag: {tag_status}")
+    await show_copy_settings(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "flow_caption_rules")
+async def flow_caption_rules_cb(call):
+    user_id = call.from_user.id
+    await bot.answer_callback_query(call.id)
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_strip_caption")
+async def toggle_strip_caption_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["strip_caption"] = not settings.get("strip_caption", False)
+    st = "ON (All media captions stripped)" if settings["strip_caption"] else "OFF (Original captions kept)"
+    await bot.answer_callback_query(call.id, f"Strip Captions: {st}")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_extract_text")
+async def toggle_extract_text_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["extract_text"] = not settings.get("extract_text", False)
+    if settings["extract_text"]:
+        settings["content_type"] = "text_extract"
+        st = "ON (Captions copied as text, media skipped)"
+    else:
+        if settings.get("content_type") == "text_extract":
+            settings["content_type"] = "all"
+        st = "OFF (Media transfer restored)"
+    await bot.answer_callback_query(call.id, f"Extract Text: {st}")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_clean_links")
+async def toggle_clean_links_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["clean_links"] = not settings.get("clean_links", False)
+    st = "ON (URLs & links removed)" if settings["clean_links"] else "OFF (Links kept)"
+    await bot.answer_callback_query(call.id, f"Remove Links: {st}")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_clean_mentions")
+async def toggle_clean_mentions_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["clean_mentions"] = not settings.get("clean_mentions", False)
+    st = "ON (@mentions removed)" if settings["clean_mentions"] else "OFF (@mentions kept)"
+    await bot.answer_callback_query(call.id, f"Remove Mentions: {st}")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_clean_hashtags")
+async def toggle_clean_hashtags_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["clean_hashtags"] = not settings.get("clean_hashtags", False)
+    st = "ON (#hashtags removed)" if settings["clean_hashtags"] else "OFF (#hashtags kept)"
+    await bot.answer_callback_query(call.id, f"Remove Hashtags: {st}")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "menu_find_replace")
+async def menu_find_replace_cb(call):
+    user_id = call.from_user.id
+    await bot.answer_callback_query(call.id)
+    await show_find_replace_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "btn_add_find_replace")
+async def btn_add_find_replace_cb(call):
+    user_id = call.from_user.id
+    user_states[user_id] = "WAIT_FIND_REPLACE"
     await bot.answer_callback_query(call.id)
 
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Back to Settings", callback_data="flow_settings"))
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Back to Find & Replace", callback_data="menu_find_replace"))
     text = (
-        "✍️ <b>Add Custom Signature</b>\n"
+        "🔄 <b>Add Find & Replace Rule</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "This text will be appended to every copied message's caption.\n\n"
-        "💡 Use <code>{channel}</code> to automatically insert the source channel's name!\n\n"
-        "<b>Example:</b>\n"
-        "<code>📥 From: {channel}\n"
-        "🔔 Join: @MyChannel</code>\n\n"
-        "Send your signature text below in chat:"
+        "Send your replacement rule in this format:\n"
+        "<code>find text -> replacement text</code>\n\n"
+        "<b>Examples:</b>\n"
+        "• <code>@OldChannel -> @MyNewChannel</code>\n"
+        "• <code>Join for free -> </code> <i>(Deletes phrase)</i>\n"
+        "• <code>spam.com -> mywebsite.com</code>\n\n"
+        "Send your replacement rule below in chat (or send /cancel):"
     )
     await bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
 
-@bot.callback_query_handler(func=lambda call: call.data == "btn_clear_sig")
-async def btn_clear_sig_cb(call):
+@bot.callback_query_handler(func=lambda call: call.data == "btn_clear_find_replace")
+async def btn_clear_find_replace_cb(call):
     user_id = call.from_user.id
     settings = get_user_copy_settings(user_id)
+    settings["find_replace_rules"] = []
+    await bot.answer_callback_query(call.id, "All replacement rules cleared.")
+    await show_find_replace_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "btn_set_header")
+async def btn_set_header_cb(call):
+    user_id = call.from_user.id
+    user_states[user_id] = "WAIT_HEADER"
+    await bot.answer_callback_query(call.id)
+
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Back to Caption Rules", callback_data="flow_caption_rules"))
+    text = (
+        "🔝 <b>Set Caption Header (Top Text)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "This text will be prepended at the very top of each message or caption.\n\n"
+        "💡 Use <code>{channel}</code> to insert the source channel's name!\n\n"
+        "<b>Example:</b>\n"
+        "<code>📢 Shared from: {channel}</code>\n\n"
+        "Send your header text below (or send <code>/clear</code> to remove):"
+    )
+    await bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "btn_clear_header")
+async def btn_clear_header_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["header"] = None
+    await bot.answer_callback_query(call.id, "Header removed.")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data in ("btn_set_footer", "btn_set_sig"))
+async def btn_set_footer_cb(call):
+    user_id = call.from_user.id
+    user_states[user_id] = "WAIT_FOOTER"
+    await bot.answer_callback_query(call.id)
+
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Back to Caption Rules", callback_data="flow_caption_rules"))
+    text = (
+        "🔚 <b>Set Caption Footer / Signature (Bottom Text)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "This text will be appended at the bottom of each message or caption.\n\n"
+        "💡 Use <code>{channel}</code> to insert the source channel's name!\n\n"
+        "<b>Example:</b>\n"
+        "<code>📥 Source: {channel}\n"
+        "🔔 Join: @MyNewChannel</code>\n\n"
+        "Send your footer text below (or send <code>/clear</code> to remove):"
+    )
+    await bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data in ("btn_clear_footer", "btn_clear_sig"))
+async def btn_clear_footer_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["footer"] = None
     settings["signature"] = None
-    await bot.answer_callback_query(call.id, "Signature removed.")
-    await show_copy_settings(call.message.chat.id, user_id, call.message.message_id)
+    await bot.answer_callback_query(call.id, "Footer / Signature removed.")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "reset_caption_rules")
+async def reset_caption_rules_cb(call):
+    user_id = call.from_user.id
+    settings = get_user_copy_settings(user_id)
+    settings["strip_caption"] = False
+    settings["extract_text"] = False
+    settings["clean_links"] = False
+    settings["clean_mentions"] = False
+    settings["clean_hashtags"] = False
+    settings["find_replace_rules"] = []
+    settings["header"] = None
+    settings["footer"] = None
+    settings["signature"] = None
+    if settings.get("content_type") == "text_extract":
+        settings["content_type"] = "all"
+    await bot.answer_callback_query(call.id, "Caption rules reset to defaults.")
+    await show_caption_menu(call.message.chat.id, user_id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "reset_settings")
 async def reset_settings_cb(call):
@@ -1657,9 +2311,19 @@ async def reset_settings_cb(call):
         "content_type": "all",
         "skip_service": True,
         "skip_forwarded": False,
+        "skip_duplicates": False,
+        "drop_forward_tag": True,
+        "strip_caption": False,
+        "extract_text": False,
+        "clean_links": False,
+        "clean_mentions": False,
+        "clean_hashtags": False,
+        "find_replace_rules": [],
+        "header": None,
+        "footer": None,
         "signature": None
     }
-    await bot.answer_callback_query(call.id, "Settings reset to defaults.")
+    await bot.answer_callback_query(call.id, "All settings reset to defaults.")
     await show_copy_settings(call.message.chat.id, user_id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "flow_confirm")
@@ -1827,18 +2491,31 @@ async def confirm_copy_cb(call):
     if not src or not dst:
         return await bot.answer_callback_query(call.id, "Session expired. Please select again.", show_alert=True)
 
+    # Duplicate Task Prevention (Tier 2)
+    if active_tasks.get(user_id, False):
+        return await bot.answer_callback_query(call.id, "⚠️ Ek copy task already chal raha hai! Pehle usse complete ya stop karein.", show_alert=True)
+
+    u_client = user_clients.get(user_id)
+    if not u_client:
+        return await bot.answer_callback_query(call.id, "Telegram client not connected. Please log in again.", show_alert=True)
+
+    # Run Pre-flight Safety Checks (Tier 1)
+    await bot.answer_callback_query(call.id, "🔍 Running pre-flight safety checks...")
+    ok, reason, is_prot = await run_preflight_checks(u_client, user_id, call.message.chat.id, src, dst)
+    if not ok:
+        return await bot.send_message(call.message.chat.id, reason, parse_mode="HTML")
+
     user_states[user_id] = None
     user_active_query[user_id] = None
     active_tasks[user_id] = True
 
-    await bot.answer_callback_query(call.id, "Starting Copy Job!")
     await bot.edit_message_text(
         "🚀 <b>Initializing Copy Engine...</b>\nScanning messages matching your selected range and filters...",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="HTML"
     )
-    asyncio.create_task(copy_messages(user_id, call.message.chat.id, src, dst))
+    asyncio.create_task(copy_messages(user_id, call.message.chat.id, src, dst, preflight_protected=is_prot))
 
 # Stop Copying Handler
 @bot.callback_query_handler(func=lambda call: call.data == "stop_copy")
@@ -1873,11 +2550,43 @@ async def view_task_cb(call):
     )
     await bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
 
+
+# ==================== CHECKPOINT CALLBACKS ====================
+
+@bot.callback_query_handler(func=lambda call: call.data == "resume_checkpoint")
+async def resume_checkpoint_cb(call):
+    user_id = call.from_user.id
+    cp = get_checkpoint(user_id)
+    if not cp:
+        return await bot.answer_callback_query(call.id, "No active checkpoint found.", show_alert=True)
+    if active_tasks.get(user_id, False):
+        return await bot.answer_callback_query(call.id, "A copy job is already running!", show_alert=True)
+
+    await bot.answer_callback_query(call.id, "▶️ Resuming copy job...")
+    active_tasks[user_id] = True
+    asyncio.create_task(copy_messages(user_id, call.message.chat.id, cp["src"], cp["dst"], resume_cp=cp))
+
+@bot.callback_query_handler(func=lambda call: call.data == "discard_checkpoint")
+async def discard_checkpoint_cb(call):
+    user_id = call.from_user.id
+    delete_checkpoint(user_id)
+    await bot.answer_callback_query(call.id, "🗑️ Checkpoint discarded.")
+    await send_dashboard(call.message.chat.id, user_id, call.message.message_id)
+
 # ==================== LOGIN WIZARD ====================
 
 @bot.callback_query_handler(func=lambda call: call.data == "start_login")
 async def start_login_cb(call):
     user_id = call.from_user.id
+    old = user_clients.get(user_id)
+    if old:
+        try:
+            if old.is_connected:
+                await old.disconnect()
+        except Exception:
+            pass
+        user_clients.pop(user_id, None)
+
     user_states[user_id] = "WAIT_API_ID"
     user_auth_data[user_id] = {}
 
@@ -1956,11 +2665,74 @@ async def handle_text_and_forwards(message):
                 parse_mode="HTML"
             )
 
-    elif state == "WAIT_SIGNATURE":
+    elif state == "WAIT_HEADER":
         settings = get_user_copy_settings(user_id)
-        settings["signature"] = text
-        await bot.send_message(chat_id, f"✅ <b>Custom Signature saved!</b>\n\nPreview:\n<i>{text}</i>", parse_mode="HTML")
-        return await show_copy_settings(chat_id, user_id)
+        if text.strip().lower() in ("/cancel", "cancel"):
+            user_states[user_id] = None
+            return await show_caption_menu(chat_id, user_id)
+        if text.strip().lower() in ("/clear", "clear"):
+            settings["header"] = None
+            await bot.send_message(chat_id, "🗑️ <b>Header removed.</b>", parse_mode="HTML")
+        else:
+            settings["header"] = text
+            await bot.send_message(chat_id, f"✅ <b>Header saved!</b>\n\nPreview:\n<i>{text}</i>", parse_mode="HTML")
+        user_states[user_id] = None
+        return await show_caption_menu(chat_id, user_id)
+
+    elif state in ("WAIT_FOOTER", "WAIT_SIGNATURE"):
+        settings = get_user_copy_settings(user_id)
+        if text.strip().lower() in ("/cancel", "cancel"):
+            user_states[user_id] = None
+            return await show_caption_menu(chat_id, user_id)
+        if text.strip().lower() in ("/clear", "clear"):
+            settings["footer"] = None
+            settings["signature"] = None
+            await bot.send_message(chat_id, "🗑️ <b>Footer / Signature removed.</b>", parse_mode="HTML")
+        else:
+            settings["footer"] = text
+            settings["signature"] = text
+            await bot.send_message(chat_id, f"✅ <b>Footer / Signature saved!</b>\n\nPreview:\n<i>{text}</i>", parse_mode="HTML")
+        user_states[user_id] = None
+        return await show_caption_menu(chat_id, user_id)
+
+    elif state == "WAIT_FIND_REPLACE":
+        settings = get_user_copy_settings(user_id)
+        if text.strip().lower() in ("/cancel", "cancel"):
+            user_states[user_id] = None
+            return await show_find_replace_menu(chat_id, user_id)
+
+        if "->" in text:
+            parts = text.split("->", 1)
+        elif "=>" in text:
+            parts = text.split("=>", 1)
+        else:
+            parts = [text, ""]
+
+        find_str = parts[0].strip()
+        repl_str = parts[1].strip() if len(parts) > 1 else ""
+
+        if not find_str:
+            return await bot.send_message(
+                chat_id,
+                "⚠️ <b>Find text cannot be empty!</b>\nFormat: <code>find text -> replace text</code>\n(Send /cancel to return)",
+                parse_mode="HTML"
+            )
+
+        if "find_replace_rules" not in settings or not isinstance(settings["find_replace_rules"], list):
+            settings["find_replace_rules"] = []
+
+        settings["find_replace_rules"].append({
+            "find": find_str,
+            "replace": repl_str
+        })
+        user_states[user_id] = None
+        repl_disp = f"<code>{repl_str}</code>" if repl_str else "<i>[DELETED]</i>"
+        await bot.send_message(
+            chat_id,
+            f"✅ <b>Replacement Rule Added!</b>\n<code>{find_str}</code> ➔ {repl_disp}",
+            parse_mode="HTML"
+        )
+        return await show_find_replace_menu(chat_id, user_id)
 
     elif state == "WAIT_PROXY":
         parsed = parse_proxy_string(text)
@@ -2114,6 +2886,11 @@ async def handle_text_and_forwards(message):
                 parse_mode="HTML"
             )
         except Exception as e:
+            try:
+                if u_client.is_connected:
+                    await u_client.disconnect()
+            except Exception:
+                pass
             await bot.send_message(chat_id, f"❌ Error sending OTP: {e}\nPlease send your phone number again:", reply_markup=cancel_kb)
 
     elif state == "WAIT_OTP":
@@ -2176,37 +2953,59 @@ async def save_user_session(user_id, u_client):
 
 # ==================== SINGLE MESSAGE & BYPASS ENGINE ====================
 
-async def copy_single_message(u_client, dst, src, msg_id, signature=None, src_title="", is_protected=False):
-    # 1. If NOT protected AND NO signature, attempt fast server-side copy
-    if not is_protected and not signature:
+async def copy_single_message(u_client, dst, src, msg_id, signature=None, src_title="", is_protected=False, settings=None):
+    if settings is None:
+        if isinstance(signature, dict):
+            settings = signature
+        elif signature:
+            settings = {"footer": signature, "signature": signature}
+        else:
+            settings = {}
+
+    has_mods = has_caption_modifications(settings)
+    drop_tag = settings.get("drop_forward_tag", True)
+
+    # 1. If NOT protected AND NO caption modifications, attempt fast server-side copy
+    if not is_protected and not has_mods:
         try:
-            await u_client.copy_message(dst, src, msg_id)
+            if drop_tag:
+                await u_client.copy_message(dst, src, msg_id)
+            else:
+                await u_client.forward_messages(dst, src, msg_id)
             return True
         except FloodWait as fw:
             await asyncio.sleep(fw.value + 1)
             try:
-                await u_client.copy_message(dst, src, msg_id)
+                if drop_tag:
+                    await u_client.copy_message(dst, src, msg_id)
+                else:
+                    await u_client.forward_messages(dst, src, msg_id)
                 return True
             except Exception:
                 pass
         except Exception:
             pass
 
-    # 2. Content Protection Bypass & Custom Signature application
+    # 2. Content Protection Bypass & Category 1 Caption Customization
     try:
         msg = await u_client.get_messages(src, msg_id)
         if not msg or msg.empty or msg.service:
             return False
 
-        # Text message
+        is_extract_text = settings.get("extract_text", False) or settings.get("content_type") == "text_extract"
+
+        # Case A: Text message
         if msg.text:
-            text_to_send = apply_signature(msg.text, signature, src_title)
+            text_to_send = process_caption_and_text(msg.text, settings, src_title, is_media=False)
+            has_wp = getattr(msg, "web_page", None) or getattr(msg, "web_page_preview", None)
+            no_wp = not bool(has_wp)
+            entities = list(msg.entities) if (getattr(msg, "entities", None) and not has_mods) else None
             try:
                 await u_client.send_message(
                     chat_id=dst,
                     text=text_to_send,
-                    entities=msg.entities if not signature else None,
-                    disable_web_page_preview=not msg.web_page
+                    entities=entities,
+                    disable_web_page_preview=no_wp
                 )
                 return True
             except FloodWait as fw:
@@ -2214,18 +3013,46 @@ async def copy_single_message(u_client, dst, src, msg_id, signature=None, src_ti
                 await u_client.send_message(
                     chat_id=dst,
                     text=text_to_send,
-                    disable_web_page_preview=not msg.web_page
+                    entities=entities,
+                    disable_web_page_preview=no_wp
                 )
                 return True
 
-        # Media message (Photos, Videos, Documents, Audio, Voice, Stickers)
-        if msg.media:
-            caption = apply_signature(msg.caption, signature, src_title)
+        # Case B: Extract Text Only from Media (Feature 2)
+        if is_extract_text:
+            caption = msg.caption or ""
+            if not caption.strip():
+                # Media has no caption to extract, skip cleanly
+                return True
+            text_to_send = process_caption_and_text(caption, settings, src_title, is_media=False)
+            try:
+                await u_client.send_message(
+                    chat_id=dst,
+                    text=text_to_send,
+                    disable_web_page_preview=True
+                )
+                return True
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+                await u_client.send_message(
+                    chat_id=dst,
+                    text=text_to_send,
+                    disable_web_page_preview=True
+                )
+                return True
 
-            # If not protected and no download needed, try copy_message with custom caption
-            if signature and not is_protected:
+        # Case C: Media message (Photos, Videos, Documents, Audio, Voice, Stickers, Animations)
+        if msg.media:
+            caption = process_caption_and_text(msg.caption or "", settings, src_title, is_media=True)
+            # If strip_caption is on, caption is ""
+            cap_arg = caption if caption != "" else ""
+            if not settings.get("strip_caption") and not caption:
+                cap_arg = None  # None preserves original caption in copy_message
+
+            # If not protected, try fast server-side copy_message with custom caption
+            if not is_protected:
                 try:
-                    await u_client.copy_message(dst, src, msg_id, caption=caption)
+                    await u_client.copy_message(dst, src, msg_id, caption=cap_arg)
                     return True
                 except Exception:
                     pass
@@ -2258,23 +3085,25 @@ async def copy_single_message(u_client, dst, src, msg_id, signature=None, src_ti
             fsize_mb = fsize / (1024 * 1024)
             print(f"📥 [DOWNLOAD OK] Msg {msg_id} ({fsize_mb:.2f} MB), uploading...")
 
+            upload_caption = caption if caption else None
+
             try:
                 if msg.photo:
-                    await u_client.send_photo(dst, temp_file, caption=caption)
+                    await u_client.send_photo(dst, temp_file, caption=upload_caption)
                 elif msg.video:
-                    await u_client.send_video(dst, temp_file, caption=caption)
+                    await u_client.send_video(dst, temp_file, caption=upload_caption)
                 elif msg.document:
-                    await u_client.send_document(dst, temp_file, caption=caption)
+                    await u_client.send_document(dst, temp_file, caption=upload_caption)
                 elif msg.audio:
-                    await u_client.send_audio(dst, temp_file, caption=caption)
+                    await u_client.send_audio(dst, temp_file, caption=upload_caption)
                 elif msg.voice:
-                    await u_client.send_voice(dst, temp_file, caption=caption)
+                    await u_client.send_voice(dst, temp_file, caption=upload_caption)
                 elif msg.animation:
-                    await u_client.send_animation(dst, temp_file, caption=caption)
+                    await u_client.send_animation(dst, temp_file, caption=upload_caption)
                 elif msg.sticker:
                     await u_client.send_sticker(dst, temp_file)
                 else:
-                    await u_client.send_document(dst, temp_file, caption=caption)
+                    await u_client.send_document(dst, temp_file, caption=upload_caption)
                 print(f"📤 [UPLOAD OK] Msg {msg_id} completed successfully")
                 return True
             except FloodWait as fw:
@@ -2282,9 +3111,9 @@ async def copy_single_message(u_client, dst, src, msg_id, signature=None, src_ti
                 await asyncio.sleep(fw.value + 1)
                 try:
                     if msg.document or msg.video:
-                        await u_client.send_document(dst, temp_file, caption=caption)
+                        await u_client.send_document(dst, temp_file, caption=upload_caption)
                     elif msg.photo:
-                        await u_client.send_photo(dst, temp_file, caption=caption)
+                        await u_client.send_photo(dst, temp_file, caption=upload_caption)
                     print(f"📤 [UPLOAD RETRY OK] Msg {msg_id} completed")
                     return True
                 except Exception as ex2:
@@ -2307,7 +3136,7 @@ async def copy_single_message(u_client, dst, src, msg_id, signature=None, src_ti
 
 # ==================== 100x BATCH & PARALLEL COPY ENGINE ====================
 
-async def copy_messages(user_id, chat_id, src, dst):
+async def copy_messages(user_id, chat_id, src, dst, resume_cp=None, preflight_protected=False):
     u_client = user_clients[user_id]
     count = 0
     messages = []
@@ -2315,133 +3144,166 @@ async def copy_messages(user_id, chat_id, src, dst):
     seen_hashes = set()
     skipped_dup = 0
     start_time = time.time()
-
-    src_title = user_auth_data.get(user_id, {}).get("src_title", "Source")
-    dst_title = user_auth_data.get(user_id, {}).get("dst_title", "Destination")
-    range_cfg = get_user_range_config(user_id)
-    settings = get_user_copy_settings(user_id)
-
-    rtype = range_cfg.get("type", "all")
-    ctype = settings.get("content_type", "all")
-    skip_fwd = settings.get("skip_forwarded", False)
-    skip_dup = settings.get("skip_duplicates", False)
-    signature = settings.get("signature")
+    start_index = 0
 
     stop_kb = InlineKeyboardMarkup()
     stop_kb.add(InlineKeyboardButton("Stop Copying 🛑", callback_data="stop_copy"))
 
-    prog_msg = await bot.send_message(
-        chat_id,
-        f"⏳ <b>Scanning message history...</b>\nFrom: <b>{src_title}</b>\nRange: <code>{range_cfg.get('label')}</code>\nFilter: <b>{CONTENT_TYPE_LABELS.get(ctype)}</b>",
-        reply_markup=stop_kb,
-        parse_mode="HTML"
-    )
+    if resume_cp:
+        # Resume directly from checkpoint without scanning history!
+        src_title = resume_cp["src_title"]
+        dst_title = resume_cp["dst_title"]
+        total = resume_cp["total"]
+        count = resume_cp["copied_count"]
+        start_index = resume_cp["current_index"]
+        skipped_dup = resume_cp["skipped_dup"]
+        ctype = resume_cp["content_type"]
+        raw_sig = resume_cp.get("signature")
+        if raw_sig and raw_sig.startswith("{"):
+            try:
+                settings = json.loads(raw_sig)
+            except Exception:
+                settings = {"signature": raw_sig, "footer": raw_sig}
+        else:
+            settings = {"signature": raw_sig, "footer": raw_sig} if raw_sig else {}
+        is_protected = resume_cp["is_protected"]
+        messages = json.loads(resume_cp["messages_json"])
+        msg_hash_map = json.loads(resume_cp["msg_hash_json"])
 
-    # Check upfront if Source channel has Content Protection enabled
-    is_protected = False
-    try:
-        src_chat = await u_client.get_chat(src)
-        is_protected = bool(getattr(src_chat, "has_protected_content", False))
+        prog_msg = await bot.send_message(
+            chat_id,
+            f"▶️ <b>Resuming copy job...</b>\nFrom: <b>{src_title}</b>\nResuming at: <b>{count}/{total}</b> messages",
+            reply_markup=stop_kb,
+            parse_mode="HTML"
+        )
+    else:
+        src_title = user_auth_data.get(user_id, {}).get("src_title", "Source")
+        dst_title = user_auth_data.get(user_id, {}).get("dst_title", "Destination")
+        range_cfg = get_user_range_config(user_id)
+        settings = get_user_copy_settings(user_id)
+
+        rtype = range_cfg.get("type", "all")
+        ctype = settings.get("content_type", "all")
+        skip_fwd = settings.get("skip_forwarded", False)
+        skip_dup = settings.get("skip_duplicates", False)
+        is_extract_mode = settings.get("extract_text", False) or ctype == "text_extract"
+
+        prog_msg = await bot.send_message(
+            chat_id,
+            f"⏳ <b>Scanning message history...</b>\nFrom: <b>{src_title}</b>\nRange: <code>{range_cfg.get('label')}</code>\nFilter: <b>{CONTENT_TYPE_LABELS.get(ctype)}</b>",
+            reply_markup=stop_kb,
+            parse_mode="HTML"
+        )
+
+        is_protected = preflight_protected
         if is_protected:
             print(f"[INFO] Source channel '{src_title}' ({src}) has Content Protection ON.")
             await bot.send_message(
                 chat_id,
                 "⚠️ <b>Source channel has Content Protection ON.</b>\n"
-                "Telegram server-side batch forward block karta hai. Bot <b>High-Speed Parallel Bypass Engine (6x concurrent)</b> use karega.",
+                "Bot <b>Parallel Bypass Engine (3x concurrent)</b> use karega.",
                 parse_mode="HTML"
             )
-    except Exception as e:
-        print(f"[WARN] Error checking chat protection: {e}")
 
-    try:
-        fetch_count = 0
-        last_fetch_edit = 0
-        kwargs = {}
-        if rtype == "last_n":
-            kwargs["limit"] = range_cfg.get("value", 500)
+        try:
+            fetch_count = 0
+            last_fetch_edit = 0
+            kwargs = {}
+            if rtype == "last_n":
+                kwargs["limit"] = range_cfg.get("value", 500)
 
-        async for msg in u_client.get_chat_history(src, **kwargs):
-            if not active_tasks.get(user_id, True):
-                try:
-                    await bot.edit_message_text("🛑 <b>Cancelled while fetching history.</b>", chat_id, prog_msg.message_id, parse_mode="HTML")
-                except Exception:
-                    pass
-                return
+            async for msg in u_client.get_chat_history(src, **kwargs):
+                if not active_tasks.get(user_id, True):
+                    try:
+                        await bot.edit_message_text("🛑 <b>Cancelled while fetching history.</b>", chat_id, prog_msg.message_id, parse_mode="HTML")
+                    except Exception:
+                        pass
+                    return
 
-            # Check ID range condition
-            if rtype == "id":
-                min_id = range_cfg.get("min", 1)
-                max_id = range_cfg.get("max", 999999999)
-                if msg.id > max_id:
-                    continue
-                if msg.id < min_id:
-                    break  # Stop scanning since history goes backwards!
-
-            # Check Date range condition
-            if rtype == "date":
-                d_from = range_cfg.get("from")
-                d_to = range_cfg.get("to")
-                msg_dt = msg.date.replace(tzinfo=None) if msg.date else None
-                if msg_dt:
-                    if msg_dt > d_to:
+                if rtype == "id":
+                    min_id = range_cfg.get("min", 1)
+                    max_id = range_cfg.get("max", 999999999)
+                    if msg.id > max_id:
                         continue
-                    if msg_dt < d_from:
-                        break  # Stop scanning older than start date!
+                    if msg.id < min_id:
+                        break
 
-            # Filter out service and empty messages
-            if msg.service or msg.empty:
-                continue
+                if rtype == "date":
+                    d_from = range_cfg.get("from")
+                    d_to = range_cfg.get("to")
+                    msg_dt = msg.date.replace(tzinfo=None) if msg.date else None
+                    if msg_dt:
+                        if msg_dt > d_to:
+                            continue
+                        if msg_dt < d_from:
+                            break
 
-            # Content type filter upfront
-            if ctype == "video" and not msg.video:
-                continue
-            if ctype == "photo" and not msg.photo:
-                continue
-            if ctype == "document" and not msg.document:
-                continue
-            if ctype == "text" and not msg.text:
-                continue
-
-            # Skip forwarded posts filter
-            if skip_fwd and (msg.forward_from_chat or msg.forward_from or msg.forward_sender_name):
-                continue
-
-            # Deduplication Engine Check (Feature 3)
-            h = compute_quick_hash(msg)
-            if skip_dup and h:
-                if is_hash_copied(user_id, h) or (h in seen_hashes):
-                    skipped_dup += 1
+                if msg.service or msg.empty:
                     continue
-                seen_hashes.add(h)
 
-            if h:
-                msg_hash_map[msg.id] = h
+                has_media = bool(msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.animation or msg.sticker)
+                is_text = bool(msg.text)
+                has_caption = bool(msg.caption)
 
-            messages.append(msg.id)
-            fetch_count += 1
-            now = time.time()
-            if now - last_fetch_edit >= 3.0:
-                last_fetch_edit = now
-                try:
-                    dup_info = f"\n⏭️ Duplicates skipped: <b>{skipped_dup}</b>" if skipped_dup > 0 else ""
-                    await bot.edit_message_text(
-                        f"⏳ <b>Scanning messages ({range_cfg.get('label')})...</b>\nFound <b>{fetch_count}</b> matching messages so far...{dup_info}\nScanning at MTProto speed...",
-                        chat_id,
-                        prog_msg.message_id,
-                        reply_markup=stop_kb,
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
-    except Exception as e:
-        await bot.send_message(chat_id, f"❌ Error reading source: {e}")
-        return
+                if ctype == "media" and not has_media:
+                    continue
+                if ctype == "video" and not msg.video:
+                    continue
+                if ctype == "photo" and not msg.photo:
+                    continue
+                if ctype == "document" and not msg.document:
+                    continue
+                if ctype == "text" and not is_text:
+                    continue
+                if is_extract_mode and not (is_text or has_caption):
+                    continue
 
-    messages.reverse()
-    total = len(messages)
-    if total == 0:
-        dup_note = f" (⏭️ {skipped_dup} duplicate messages skipped)" if skipped_dup > 0 else ""
-        return await bot.send_message(chat_id, f"⚠️ Source chat has no copyable messages matching your filter (<b>{CONTENT_TYPE_LABELS.get(ctype)}</b>) and range!{dup_note}", parse_mode="HTML")
+                if skip_fwd and (msg.forward_from_chat or msg.forward_from or msg.forward_sender_name):
+                    continue
+
+                if is_extract_mode:
+                    txt = msg.text or msg.caption or ""
+                    h = f"extract_{hashlib.md5(txt.strip().encode('utf-8')).hexdigest()}" if txt.strip() else None
+                else:
+                    h = compute_quick_hash(msg)
+
+                if skip_dup and h:
+                    if is_hash_copied(user_id, h) or (h in seen_hashes):
+                        skipped_dup += 1
+                        continue
+                    seen_hashes.add(h)
+
+                if h:
+                    msg_hash_map[msg.id] = h
+
+                messages.append(msg.id)
+                fetch_count += 1
+                now = time.time()
+                if now - last_fetch_edit >= 3.0:
+                    last_fetch_edit = now
+                    try:
+                        dup_info = f"\n⏭️ Duplicates skipped: <b>{skipped_dup}</b>" if skipped_dup > 0 else ""
+                        await bot.edit_message_text(
+                            f"⏳ <b>Scanning messages ({range_cfg.get('label')})...</b>\nFound <b>{fetch_count}</b> matching messages so far...{dup_info}\nScanning at MTProto speed...",
+                            chat_id,
+                            prog_msg.message_id,
+                            reply_markup=stop_kb,
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            await bot.send_message(chat_id, f"❌ Error reading source: {e}")
+            return
+
+        messages.reverse()
+        total = len(messages)
+        if total == 0:
+            dup_note = f" (⏭️ {skipped_dup} duplicate messages skipped)" if skipped_dup > 0 else ""
+            return await bot.send_message(chat_id, f"⚠️ Source chat has no copyable messages matching your filter (<b>{CONTENT_TYPE_LABELS.get(ctype)}</b>) and range!{dup_note}", parse_mode="HTML")
+
+        # Save initial checkpoint
+        save_checkpoint(user_id, src, dst, src_title, dst_title, total, 0, 0, skipped_dup, range_cfg.get('label', ''), ctype, settings, is_protected, messages, msg_hash_map)
 
     # Resolve peers once
     try:
@@ -2462,25 +3324,36 @@ async def copy_messages(user_id, chat_id, src, dst):
         except Exception as e:
             return await bot.send_message(chat_id, f"❌ Error resolving destination chat: {e}")
 
-    # Track active task info for dashboard
     user_task_info[user_id] = {
         "src_title": src_title,
         "dst_title": dst_title,
-        "count": 0,
+        "count": count,
         "total": total
     }
 
-    mode_label = "Parallel Bypass (6x)" if (is_protected or signature) else "100× MTProto Batching"
+    has_mods = has_caption_modifications(settings)
+    is_extract_mode = settings.get("extract_text", False) or ctype == "text_extract"
 
+    if is_protected:
+        mode_label = "Parallel Bypass (3x)"
+    elif is_extract_mode:
+        mode_label = "Caption Extraction (3x)"
+    elif has_mods:
+        mode_label = "Caption Processor (3x)"
+    else:
+        mode_label = "100× MTProto Batching"
+
+    # Smooth & Safe Parameters: 25 msgs per batch
     BATCH_SIZE = 25
-    SAFE_DELAY = 0.7  # 25 msgs / 0.7s = ~35 msg/s (MTProto safe rate)
+    SAFE_DELAY = 0.8  # ~31 msg/s throughput with smooth count updates
     total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    msgs_since_cooldown = 0
 
     job_state = {
-        "count": 0,
-        "batch_num": 1,
+        "count": count,
+        "batch_num": (start_index // BATCH_SIZE) + 1,
         "total_batches": total_batches,
-        "current_batch_size": min(BATCH_SIZE, total),
+        "current_batch_size": min(BATCH_SIZE, total - count),
         "status_note": "🚀 Starting copy...",
         "mode_label": mode_label
     }
@@ -2502,7 +3375,7 @@ async def copy_messages(user_id, chat_id, src, dst):
 
         now = time.time()
         elapsed = max(0.1, now - start_time)
-        speed = round(cur / elapsed, 1)
+        speed = round((cur - (resume_cp["copied_count"] if resume_cp else 0)) / elapsed, 1)
         remaining = max(0, tot - cur)
 
         if speed > 0 and remaining > 0:
@@ -2558,7 +3431,6 @@ async def copy_messages(user_id, chat_id, src, dst):
             except Exception:
                 pass
 
-    # Background Heartbeat Worker — refreshes UI every 2 seconds independently
     async def heartbeat_worker():
         while not copy_done_event.is_set():
             if not active_tasks.get(user_id, True):
@@ -2576,7 +3448,7 @@ async def copy_messages(user_id, chat_id, src, dst):
     try:
         await do_ui_render(force=True)
 
-        for i in range(0, total, BATCH_SIZE):
+        for i in range(start_index, total, BATCH_SIZE):
             if not active_tasks.get(user_id, True):
                 stopped_by_user = True
                 break
@@ -2585,110 +3457,215 @@ async def copy_messages(user_id, chat_id, src, dst):
             batch_num = (i // BATCH_SIZE) + 1
             job_state["batch_num"] = batch_num
             job_state["current_batch_size"] = len(batch)
-            job_state["status_note"] = f"🚀 Batch {batch_num}/{total_batches} in progress..."
+            job_state["status_note"] = f"🚀 Batch {batch_num}/{total_batches} ({len(batch)} msgs)..."
 
-            if count > 0 and count % 2000 == 0:
-                job_state["status_note"] = "🛡️ Anti-ban safety: 5s breather..."
-                await do_ui_render()
-                await asyncio.sleep(5)
-                if not active_tasks.get(user_id, True):
+            # Anti-ban Sustained Cooldown (Fix 3): Every 500 messages, take a 30s breather
+            if msgs_since_cooldown >= 500:
+                msgs_since_cooldown = 0
+                job_state["status_note"] = "🛡️ Anti-ban cooldown: 30s breather (account safety)..."
+                start_cd = time.time()
+                while time.time() - start_cd < 30:
+                    if not active_tasks.get(user_id, True):
+                        stopped_by_user = True
+                        break
+                    rem_cd = int(30 - (time.time() - start_cd))
+                    job_state["status_note"] = f"🛡️ Anti-ban cooldown: resting {rem_cd}s safely..."
+                    await do_ui_render()
+                    await asyncio.sleep(min(2.0, max(0.1, rem_cd)))
+
+                if stopped_by_user or not active_tasks.get(user_id, True):
                     stopped_by_user = True
                     break
 
             batch_success = False
+            has_mods = has_caption_modifications(settings)
+            drop_tag = settings.get("drop_forward_tag", True)
 
-            # If NOT protected AND NO custom signature, use ultra-fast ForwardMessages batching
-            if not is_protected and not signature:
-                try:
-                    await u_client.invoke(
-                        functions.messages.ForwardMessages(
-                            to_peer=to_peer,
-                            from_peer=from_peer,
-                            id=batch,
-                            drop_author=True,
-                            random_id=[u_client.rnd_id() for _ in batch]
-                        )
-                    )
-                    count += len(batch)
-                    job_state["count"] = count
-                    batch_success = True
-
-                    batch_hashes = [msg_hash_map[m] for m in batch if m in msg_hash_map]
-                    if batch_hashes:
-                        record_copied_hashes_batch(user_id, src, batch_hashes)
-
-                    print(f"[BATCH OK] Forwarded {len(batch)} messages ({count}/{total})")
-                    job_state["status_note"] = f"✅ Batch {batch_num}/{total_batches} completed"
-                    await do_ui_render()
-                    await asyncio.sleep(SAFE_DELAY)
-                except FloodWait as e:
-                    wait_time = e.value + 1
-                    print(f"[FLOODWAIT] FloodWait {wait_time}s on batch forward")
-                    job_state["status_note"] = f"⏳ FloodWait: resting {wait_time}s safely..."
-                    await do_ui_render(force=True)
-                    await asyncio.sleep(wait_time)
+            # If NOT protected AND NO custom caption modifications, use ForwardMessages with robust FloodWait retry loop
+            if not is_protected and not has_mods:
+                max_fw_attempts = 3
+                for fw_attempt in range(max_fw_attempts):
+                    if not active_tasks.get(user_id, True):
+                        stopped_by_user = True
+                        break
                     try:
                         await u_client.invoke(
                             functions.messages.ForwardMessages(
                                 to_peer=to_peer,
                                 from_peer=from_peer,
                                 id=batch,
-                                drop_author=True,
+                                drop_author=drop_tag,
                                 random_id=[u_client.rnd_id() for _ in batch]
                             )
                         )
                         count += len(batch)
+                        msgs_since_cooldown += len(batch)
                         job_state["count"] = count
                         batch_success = True
+
+                        # Update persistent checkpoint progress (lightweight O(1))
+                        update_checkpoint_progress(user_id, count, i + len(batch), skipped_dup)
+
                         batch_hashes = [msg_hash_map[m] for m in batch if m in msg_hash_map]
                         if batch_hashes:
                             record_copied_hashes_batch(user_id, src, batch_hashes)
-                        job_state["status_note"] = f"✅ Batch {batch_num}/{total_batches} completed after rest"
+
+                        print(f"[BATCH OK] Forwarded {len(batch)} messages ({count}/{total})")
+                        job_state["status_note"] = f"✅ Batch {batch_num}/{total_batches} completed"
                         await do_ui_render()
                         await asyncio.sleep(SAFE_DELAY)
-                    except Exception as ex:
-                        print(f"[BATCH RETRY FAILED] {type(ex).__name__}: {ex}")
-                        batch_success = False
-                except Exception as e:
-                    print(f"[BATCH FAILED] {type(e).__name__}: {e}. Switching to parallel fallback.")
-                    batch_success = False
+                        break  # Forward success, exit retry loop!
 
-            # If protected, or custom signature, or batch failed: run high-speed parallel workers
-            if not batch_success:
-                is_protected = True  # Mark protected for subsequent batches to avoid wasted ForwardMessages
-                job_state["mode_label"] = "Parallel Bypass (4x)"
-                job_state["status_note"] = "Downloading & re-uploading media..."
-                sem = asyncio.Semaphore(4)  # 4x concurrency avoids FloodWait & disk choking
+                    except PeerFlood:
+                        # CRITICAL: PeerFlood detection (Tier 1) - Stop immediately, zero retries
+                        active_tasks[user_id] = False
+                        mark_peerflood_blocked(user_id, hours=24)
+                        save_checkpoint(user_id, src, dst, src_title, dst_title, total, count, i, skipped_dup, "", ctype, settings, is_protected, messages, msg_hash_map)
+                        print(f"🚨 [PEER_FLOOD] Account {user_id} restricted! Immediate halt.")
+                        await bot.send_message(
+                            chat_id,
+                            "🚨 <b>CRITICAL SAFETY ALERT: Telegram PeerFlood Detected!</b>\n\n"
+                            "Telegram ne is account ko temporary restriction diya hai.\n"
+                            "⚠️ <b>Account Ban Risk:</b> Bot ne turant copying rok di hai. Koi retry na karein.\n"
+                            f"🛡️ <b>Checkpoint Saved:</b> Progress ({count}/{total}) safe hai.\n"
+                            "⏳ Kripya account ko <b>12–24 ghante</b> rest karne dein.",
+                            parse_mode="HTML"
+                        )
+                        return
+
+                    except FloodWait as e:
+                        wait_time = e.value + 5  # 5s safety buffer
+                        record_floodwait_event(user_id)
+                        print(f"[FLOODWAIT] Attempt {fw_attempt+1}/{max_fw_attempts}: FloodWait {wait_time}s on batch forward")
+
+                        # Dynamic Rate Limiter: 3+ FloodWaits in 1 hour triggers Auto-Safety Stop
+                        recent_fws = len([t for t in user_floodwait_timestamps.get(user_id, []) if time.time() - t <= 3600])
+                        if recent_fws >= 3:
+                            active_tasks[user_id] = False
+                            save_checkpoint(user_id, src, dst, src_title, dst_title, total, count, i, skipped_dup, "", ctype, settings, is_protected, messages, msg_hash_map)
+                            await bot.send_message(
+                                chat_id,
+                                f"🛑 <b>Auto-Safety Stop: Account Hot!</b>\n\n"
+                                f"Pichhle 1 ghante mein <b>{recent_fws} FloodWaits</b> detect hue.\n"
+                                "Telegram ban se bachane ke liye bot ne copying safely pause kar di hai.\n\n"
+                                f"🛡️ <b>Checkpoint saved at {count}/{total} messages.</b>\n"
+                                "Account ko 1-2 ghante rest dein, phir Dashboard se resume karein.",
+                                parse_mode="HTML"
+                            )
+                            return
+
+                        # Adaptive pacing: increase SAFE_DELAY by 30%
+                        SAFE_DELAY = min(4.5, SAFE_DELAY * 1.3)
+
+                        # If unusually long FloodWait (> 300s), notify user
+                        if wait_time > 300:
+                            mins, secs = divmod(wait_time, 60)
+                            try:
+                                await bot.send_message(
+                                    chat_id,
+                                    f"⏳ <b>Telegram FloodWait ({mins}m {secs}s)</b>\n\n"
+                                    f"Telegram has requested a wait period.\n"
+                                    f"🛡️ <b>Checkpoint is safely saved at {count}/{total} messages.</b>\n\n"
+                                    f"• Bot is resting safely in background.\n"
+                                    f"• Or you can tap <b>Stop Copying</b> and resume anytime later!",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                pass
+
+                        # Responsive chunked sleep (2s chunks) so user can Stop anytime
+                        start_wait = time.time()
+                        while time.time() - start_wait < wait_time:
+                            if not active_tasks.get(user_id, True):
+                                stopped_by_user = True
+                                break
+                            rem_wait = int(wait_time - (time.time() - start_wait))
+                            rem_m, rem_s = divmod(rem_wait, 60)
+                            rem_str = f"{rem_m}m {rem_s:02d}s" if rem_m > 0 else f"{rem_s}s"
+                            job_state["status_note"] = f"⏳ FloodWait: resting {rem_str} safely..."
+                            await do_ui_render()
+                            await asyncio.sleep(min(2.0, max(0.1, rem_wait)))
+
+                        if stopped_by_user or not active_tasks.get(user_id, True):
+                            stopped_by_user = True
+                            break
+                        continue
+
+                    except Exception as e:
+                        err_str = str(e)
+                        if "PEER_FLOOD" in err_str or "420" in err_str:
+                            active_tasks[user_id] = False
+                            mark_peerflood_blocked(user_id, hours=24)
+                            save_checkpoint(user_id, src, dst, src_title, dst_title, total, count, i, skipped_dup, "", ctype, settings, is_protected, messages, msg_hash_map)
+                            await bot.send_message(
+                                chat_id,
+                                "🚨 <b>CRITICAL: PeerFlood Error!</b> Telegram account restricted. Copying stopped.",
+                                parse_mode="HTML"
+                            )
+                            return
+                        print(f"[BATCH FAILED] {type(e).__name__}: {e}. Switching to parallel fallback.")
+                        batch_success = False
+                        break
+
+            # If protected, or custom caption modifications, or batch forward failed: run high-speed parallel workers
+            if not batch_success and active_tasks.get(user_id, True):
+                if preflight_protected:
+                    is_protected = True
+
+                is_extract_mode = settings.get("extract_text", False) or ctype == "text_extract"
+                if is_protected:
+                    job_state["mode_label"] = "Parallel Bypass (3x)"
+                    job_state["status_note"] = "Downloading & re-uploading media..."
+                elif is_extract_mode:
+                    job_state["mode_label"] = "Caption Extraction (3x)"
+                    job_state["status_note"] = "Extracting captions as text..."
+                else:
+                    job_state["mode_label"] = "Caption Processor (3x)"
+                    job_state["status_note"] = "Processing custom captions..."
+
+                sem = asyncio.Semaphore(3)
+                batch_collected_hashes = []
 
                 async def _copy_one(mid):
-                    nonlocal count
+                    nonlocal count, msgs_since_cooldown
                     async with sem:
                         if not active_tasks.get(user_id, True):
                             return 0
                         try:
                             ok = await copy_single_message(
                                 u_client, dst, src, mid,
-                                signature=signature, src_title=src_title,
-                                is_protected=is_protected
+                                src_title=src_title,
+                                is_protected=is_protected,
+                                settings=settings
                             )
                             if ok:
                                 count += 1
+                                msgs_since_cooldown += 1
                                 job_state["count"] = count
                                 mid_h = msg_hash_map.get(mid)
                                 if mid_h:
-                                    record_copied_hashes_batch(user_id, src, [mid_h])
+                                    batch_collected_hashes.append(mid_h)
                                 job_state["status_note"] = f"✅ Copied msg {mid} ({count}/{total})"
-                                # Real-time UI render on each completed file!
                                 await do_ui_render()
                                 return 1
                             else:
-                                print(f"⚠️ [BYPASS SKIPPED/FAILED] msg {mid}")
+                                print(f"⚠️ [COPY SKIPPED/FAILED] msg {mid}")
                                 return 0
                         except Exception as ex:
                             print(f"❌ [PARALLEL COPY FAIL] msg {mid}: {type(ex).__name__}: {ex}")
                             return 0
 
                 await asyncio.gather(*[_copy_one(m) for m in batch], return_exceptions=False)
+
+                # Batch write hashes once for the entire batch (Bug #3 fix)
+                if batch_collected_hashes:
+                    record_copied_hashes_batch(user_id, src, batch_collected_hashes)
+
+                # Update checkpoint progress (lightweight O(1))
+                update_checkpoint_progress(user_id, count, i + len(batch), skipped_dup)
+
+                # Safe rate limit delay after bypass batch (Bug #3 fix)
+                await asyncio.sleep(SAFE_DELAY)
                 await do_ui_render()
 
     finally:
@@ -2704,13 +3681,13 @@ async def copy_messages(user_id, chat_id, src, dst):
     failed_count = max(0, total - count)
     speed = round(count / max(duration_sec, 0.1), 1)
 
-    # Save job analytics to stats.db (Feature 4)
     record_job_stats(user_id, src_title, dst_title, total, count, skipped_dup, failed_count, duration_sec)
 
     if stopped_by_user:
+        # Checkpoint is kept so user can resume anytime!
         try:
             await bot.edit_message_text(
-                f"🛑 <b>Copying manually stopped!</b>\nSuccessfully copied {count}/{total} messages.",
+                f"🛑 <b>Copying paused/stopped!</b>\nProgress saved at <b>{count}/{total}</b> messages.\nYou can resume anytime from the dashboard.",
                 chat_id,
                 prog_msg.message_id,
                 reply_markup=None,
@@ -2718,9 +3695,14 @@ async def copy_messages(user_id, chat_id, src, dst):
             )
         except Exception:
             pass
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🏠 Back to Dashboard", callback_data="nav_home"))
-        await bot.send_message(chat_id, f"🛑 <b>Copying manually stopped!</b>\nSuccessfully copied {count}/{total} messages.", reply_markup=kb, parse_mode="HTML")
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton(f"▶️ Resume Copying ({count}/{total})", callback_data="resume_checkpoint"))
+        kb.add(InlineKeyboardButton("🏠 Back to Dashboard", callback_data="nav_home"))
+        await bot.send_message(chat_id, f"🛑 <b>Copy job paused!</b>\nSuccessfully copied {count}/{total} messages.\nCheckpoint is safely saved.", reply_markup=kb, parse_mode="HTML")
         return
+
+    # Job completely finished -> clear checkpoint
+    delete_checkpoint(user_id)
 
     done_kb = InlineKeyboardMarkup()
     done_kb.row(

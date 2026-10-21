@@ -4,12 +4,10 @@
     7251749429
   ],
   "active_scripts": [
-    "mystore-bot-vps/main.py",
-    "Ghidrabot for Vps/Ghidrabot vps/bot.py"
+    "mystore-bot-vps/main.py"
   ],
   "manually_stopped_scripts": [
-    "mystore-bot-vps",
-    "telegram_copier_bot"
+    "mystore-bot-vps"
   ],
   "auto_run_file": null,
   "env_vault": {
@@ -18,8 +16,8 @@
     "Ghidrabot for Vps": "KFGTczzPCuZmjgVGldLnoHGY35nvp6OFv+tToW/ZoZGDbs9lsDImeYAi58yqLAvMB0qQ/R7jMD1oybG+yPYFKniPWspk5naWTLGl94Af2gRNRx8qxJr3hi5jpct21ow6D//b0uir8gZ8d+p3LLjfq8Jdof9DvNomrWDOs8c6/NtAEHou3gTjAfkVAhyMrEQMM00EJrhAqK7nHvYNRRtwhMXwxyo5ROOII+hctvd5Mad74VPBv6hD/BYQ/XDJy4f1IF05776dQbK4dNUYFlT8LDng4gR8ZamHl7YPoMoSX8avaY7YMEAFTxGGX0+jKhmKd5woBHtsLBWa0rn6LmSfgW0JxPvGu0c1bhZdVCzHpOtnw4ln7dXhX4AwihjRbm70z1W2NmghkftvkpN+2TYzfOHqNge48RjHw5LatPu1XfYg8jymhIfdKUua0k1VzrNIj9JdgCEkVGHosQI=",
     "Ghidrabot for Vps/Ghidrabot vps/bot.py": "KFGTczzPCuZmjgVGldLnoHGY35nvp6OFv+tToW/ZoZGDbs9lsDImeYAi58yqLAvMB0qQ/R7jMD1oybG+yPYFKniPWspk5naWTLGl94Af2gRNRx8qxJr3hi5jpct21ow6D//b0uir8gZ8d+p3LLjfq8Jdof9DvNomrWDOs8c6/NtAEHou3gTjAfkVAhyMrEQMM00EJrhAqK7nHvYNRRtwhMXwxyo5ROOII+hctvd5Mad74VPBv6hD/BYQ/XDJy4f1IF05776dQbK4dNUYFlT8LDng4gR8ZamHl7YPoMoSX8avaY7YMEAFTxGGX0+jKhmKd5woBHtsLBWa0rn6LmSfgW0JxPvGu0c1bhZdVCzHpOtnw4ln7dXhX4AwihjRbm70z1W2NmghkftvkpN+2TYzfOHqNge48RjHw5LatPu1XfYg8jymhIfdKUua0k1VzrNIj9JdgCEkVGHosQI=",
     "Ghidrabot_for_Vps": "KFGTczzPCuZmjgVGldLnoHGY35nvp6OFv+tToW/ZoZGDbs9lsDImeYAi58yqLAvMB0qQ/R7jMD1oybG+yPYFKniPWspk5naWTLGl94Af2gRNRx8qxJr3hi5jpct21ow6D//b0uir8gZ8d+p3LLjfq8Jdof9DvNomrWDOs8c6/NtAEHou3gTjAfkVAhyMrEQMM00EJrhAqK7nHvYNRRtwhMXwxyo5ROOII+hctvd5Mad74VPBv6hD/BYQ/XDJy4f1IF05776dQbK4dNUYFlT8LDng4gR8ZamHl7YPoMoSX8avaY7YMEAFTxGGX0+jKhmKd5woBHtsLBWa0rn6LmSfgW0JxPvGu0c1bhZdVCzHpOtnw4ln7dXhX4AwihjRbm70z1W2NmghkftvkpN+2TYzfOHqNge48RjHw5LatPu1XfYg8jymhIfdKUua0k1VzrNIj9JdgCEkVGHosQI=",
-    "telegram_copier_bot": "PforzUTyAaKv7fo1IUvm1iQ+5hn1qOpfworeRN2r7q5V5Otu6MFJEmGx6QpSH4I/49W96N2qqRaQsfpzsYAZQd19PGxao0Qr0rvaxr9DKYxKWYfuosXT3diYZZs4MA6S+4Ksx64NZ5NspzXYm4/QFlKVzi48ZcFW5EGtxHrK1Yk4yJnVDteRIPRcJruv/MVPFUcHSVyosmEXz5ZkBwHbQR3Y5wPk54sBDxquytlwjL0vNBz8aBehGJLCWrJ3BiHqx3JbSO3OQzU=",
-    "telegram_copier_bot/bot.py": "PforzUTyAaKv7fo1IUvm1iQ+5hn1qOpfworeRN2r7q5V5Otu6MFJEmGx6QpSH4I/49W96N2qqRaQsfpzsYAZQd19PGxao0Qr0rvaxr9DKYxKWYfuosXT3diYZZs4MA6S+4Ksx64NZ5NspzXYm4/QFlKVzi48ZcFW5EGtxHrK1Yk4yJnVDteRIPRcJruv/MVPFUcHSVyosmEXz5ZkBwHbQR3Y5wPk54sBDxquytlwjL0vNBz8aBehGJLCWrJ3BiHqx3JbSO3OQzU="
+    "telegram_copier_bot": "kApin65kTy0O/SM6qWKpxvhnMHMgPzWS9PXF34hEKcSx+YdDjszPVr653Yp2wZqDotKnbE8ps+vKrk25g1/3EzZb/wJ75PNe2Q326oYCVVMNpbTgJtVkI7KkdIfF5StLnV6L9FMn2IWuBGiTzk4HGknnHZUYO8zcmwjtPCyFTYFD8u30Rypp2fs68BXiAaPt8qILF6NWezNqunqWHk3V4yQqVZ1Lw3bvrw+g2AgkqWoLhe3RKPVxWuOCXZ+LzcjgwW2dnlSt/SA=",
+    "telegram_copier_bot/bot.py": "kApin65kTy0O/SM6qWKpxvhnMHMgPzWS9PXF34hEKcSx+YdDjszPVr653Yp2wZqDotKnbE8ps+vKrk25g1/3EzZb/wJ75PNe2Q326oYCVVMNpbTgJtVkI7KkdIfF5StLnV6L9FMn2IWuBGiTzk4HGknnHZUYO8zcmwjtPCyFTYFD8u30Rypp2fs68BXiAaPt8qILF6NWezNqunqWHk3V4yQqVZ1Lw3bvrw+g2AgkqWoLhe3RKPVxWuOCXZ+LzcjgwW2dnlSt/SA="
   },
   "active_script": null
 }
