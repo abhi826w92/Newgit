@@ -1,6 +1,0 @@
-.env
-db.json
-*.session
-*.session-journal
-__pycache__/
-*.pyc

@@ -4,11 +4,12 @@
     7251749429
   ],
   "active_scripts": [
-    "mystore-bot-vps/main.py",
-    "telegram_copier_bot/bot.py"
+    "mystore-bot-vps/main.py"
   ],
   "manually_stopped_scripts": [
-    "mystore-bot-vps"
+    "mystore-bot-vps",
+    "telegram_copier_bot",
+    "telegram_copier_bot/bot.py"
   ],
   "auto_run_file": null,
   "env_vault": {
