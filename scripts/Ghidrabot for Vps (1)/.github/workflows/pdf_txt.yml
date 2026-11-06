@@ -1,41 +1,32 @@
-name: decompile-smali
-run-name: smali-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
-# re-register: workflow was stuck in deleted state after history reset
+name: pdf-to-txt
+run-name: pdftxt-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
 on:
   repository_dispatch:
-    types: [decompile-smali, decompile-smali-extract]
+    types: [pdf-to-txt]
 
 permissions:
   actions: write
   contents: read
 
 jobs:
-  decompile:
+  convert:
     runs-on: ubuntu-latest
     timeout-minutes: 1440
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Cache baksmali
-        id: baksmali-cache
-        uses: actions/cache@v4
-        with:
-          path: /opt/baksmali.jar
-          key: baksmali-3.0.9
-
-      - name: Get baksmali
-        if: steps.baksmali-cache.outputs.cache-hit != 'true'
+      - name: Install poppler-utils + tesseract
         run: |
-          sudo curl -L -o /opt/baksmali.jar https://github.com/baksmali/smali/releases/download/3.0.9/baksmali-3.0.9-fat.jar
-          test -f /opt/baksmali.jar
-          echo "baksmali ready"
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils tesseract-ocr \
+            tesseract-ocr-hin tesseract-ocr-urd tesseract-ocr-ben \
+            tesseract-ocr-mar tesseract-ocr-guj tesseract-ocr-tam \
+            tesseract-ocr-tel tesseract-ocr-kan tesseract-ocr-mal \
+            tesseract-ocr-pan
+          pdftotext -v
+          tesseract --version
+          tesseract --list-langs
 
       - name: Cache TG Session
         uses: actions/cache@v4
@@ -63,7 +54,7 @@ jobs:
               print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
           PYEOF
 
-      - name: Run Smali worker
+      - name: Run PDF → TXT worker
         env:
           TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
           PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
@@ -77,14 +68,14 @@ jobs:
           PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
           PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
           PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
-          PAYLOAD_SMALI_MODE: ${{ github.event.action == 'decompile-smali-extract' && 'extract' || 'full' }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
+          OMP_NUM_THREADS: "2"
 
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q httpx "pyrogram==2.0.106" tgcrypto
-          /tmp/venv/bin/python worker_smali.py
+          /tmp/venv/bin/python worker_pdf_txt.py
 
       - name: Report Failure to Telegram
         if: failure()
@@ -105,7 +96,7 @@ jobs:
                       data={
                           "chat_id": chat_id,
                           "message_id": msg_id,
-                          "text": "❌ <b>Smali Disassembly Failed!</b>\nWorkflow runner encountered an unexpected error during setup or execution.",
+                          "text": "❌ <b>PDF Conversion Failed!</b>\nWorkflow runner encountered an unexpected error during setup or execution.",
                           "parse_mode": "HTML"
                       },
                       timeout=10

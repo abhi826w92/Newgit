@@ -1,5 +1,5 @@
 import asyncio
-import glob
+import json
 import logging
 import os
 import re
@@ -16,7 +16,7 @@ from urllib.parse import unquote
 import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("worker_dex_compile")
+log = logging.getLogger("worker_pdf_txt")
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 FILE_URL = os.environ.get("PAYLOAD_FILE_URL", "")
@@ -30,13 +30,10 @@ IS_PREMIUM = os.environ.get("PAYLOAD_IS_PREMIUM", "False").lower() == "true"
 USER_ID = os.environ.get("PAYLOAD_USER_ID", CHAT_ID)
 REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
-MODE = os.environ.get("PAYLOAD_DEXCOMPILE_MODE", "auto")
-MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else (300 if IS_PREMIUM else 30)
 
-SMALI_JAR = "/opt/smali.jar"
-R8_JAR = "/opt/r8.jar"
-MAX_SMALI_FILES_FREE = 1000
-MAX_SMALI_FILES_PREMIUM = 5000
+MAX_PDF_FREE = 5
+MAX_PDF_PREMIUM = 20
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -47,22 +44,10 @@ class JobCancelled(BaseException):
     pass
 
 
-def find_android_jar():
-    for env in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
-        root = os.environ.get(env)
-        if root and os.path.isdir(root):
-            pl_dir = os.path.join(root, "platforms")
-            if os.path.isdir(pl_dir):
-                try:
-                    vers = sorted((d for d in os.listdir(pl_dir) if re.match(r"^android-\d+$", d)),
-                                  key=lambda v: int(v.split("-")[1]), reverse=True)
-                except Exception:
-                    vers = []
-                for v in vers:
-                    p = os.path.join(pl_dir, v, "android.jar")
-                    if os.path.exists(p):
-                        return p
-    return ""
+class TolerantZipFile(zipfile.ZipFile):
+    @property
+    def _end_offset(self):
+        return None
 
 
 def check_download_size(total_bytes: int):
@@ -92,8 +77,6 @@ def tg(method: str, **params):
         log.warning("tg %s failed: %s", method, e)
         return None
 
-
-import json
 
 def edit(text: str, parse_mode: str = None, keep_button: bool = True):
     if CANCELLED["v"]:
@@ -125,7 +108,7 @@ def proc_cpu_usage(pid: int) -> int:
         return -1
 
 
-async def send_error_log(work_dir, exception_obj, title="DEX Compile failed"):
+async def send_error_log(work_dir, exception_obj, title="PDF → TXT conversion failed"):
     import traceback
     err_str = traceback.format_exc()
     log.error("%s: %s", title, exception_obj)
@@ -216,14 +199,16 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
         raise ValueError("Could not download file from this link.")
 
 
-async def run_tool(cmd: list, on_progress, label: str, timeout: int = 86400, progress_stall: int = 1800):
+async def run_tool(cmd: list, on_progress, label: str, timeout: int = 86400, progress_stall: int = 1800, heartbeat=None, check_errors: bool = True):
     log.info("Running: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
     )
     out_lines = []
+    last_hb = time.monotonic()
 
     async def read_stream():
+        nonlocal last_hb
         last_activity = time.monotonic()
         last_cpu = proc_cpu_usage(proc.pid)
         while True:
@@ -233,6 +218,7 @@ async def run_tool(cmd: list, on_progress, label: str, timeout: int = 86400, pro
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
                 last_activity = time.monotonic()
+                last_hb = time.monotonic()
             except asyncio.TimeoutError:
                 cpu = proc_cpu_usage(proc.pid)
                 if cpu > last_cpu:
@@ -241,6 +227,9 @@ async def run_tool(cmd: list, on_progress, label: str, timeout: int = 86400, pro
                 elif time.monotonic() - last_activity >= progress_stall:
                     proc.kill()
                     raise RuntimeError(f"{label} stalled: no CPU activity for {progress_stall//60} minutes")
+                if heartbeat and time.monotonic() - last_hb >= 60:
+                    last_hb = time.monotonic()
+                    await heartbeat()
                 continue
             if not raw:
                 break
@@ -249,7 +238,7 @@ async def run_tool(cmd: list, on_progress, label: str, timeout: int = 86400, pro
                 out_lines.append(line)
                 if len(out_lines) > 100:
                     del out_lines[:-100]
-                if "error" in line.lower() or "exception" in line.lower():
+                if check_errors and ("error" in line.lower() or "exception" in line.lower()):
                     await on_progress(60, f"⚠️ {label} (checking)...")
         return await proc.wait()
 
@@ -265,261 +254,183 @@ async def run_tool(cmd: list, on_progress, label: str, timeout: int = 86400, pro
 
 
 def find_inputs(src_dir: Path, suffixes) -> list:
-    return [str(p) for p in sorted(Path(src_dir).rglob("*")) if p.is_file() and p.suffix.lower() in suffixes]
+    return [p for p in sorted(Path(src_dir).rglob("*")) if p.is_file() and p.suffix.lower() in suffixes]
 
 
-async def compile_smali_to_dex(input_path: Path, work_dir: Path, on_progress) -> Path:
-    await on_progress(30, "🧩 Assembling Smali → .dex...")
-    smali_sources = []
-    if input_path.is_file() and input_path.suffix.lower() == ".smali":
-        smali_sources = [str(input_path)]
-    elif input_path.is_dir():
-        smali_sources = [str(p) for p in sorted(input_path.rglob("*.smali"))]
-    else:
-        ext = Path(FILENAME).suffix.lower()
-        if ext == ".zip":
-            extract_dir = work_dir / "smali_src"
-            extract_dir.mkdir(exist_ok=True)
-            with zipfile.ZipFile(input_path, "r") as zf:
-                zf.extractall(extract_dir)
-            smali_sources = [str(p) for p in sorted(extract_dir.rglob("*.smali"))]
-            input_path = extract_dir
-        else:
-            raise ValueError("Unsupported input. Send a .smali file or a ZIP containing .smali files.")
-
-    if not smali_sources:
-        raise ValueError("No .smali files found in the input.")
-
-    max_files = MAX_SMALI_FILES_PREMIUM if IS_PREMIUM else MAX_SMALI_FILES_FREE
-    if not IS_ADMIN and len(smali_sources) > max_files:
-        raise ValueError(f"Too many .smali files: {len(smali_sources)} — max {max_files} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
-
-    dex_path = work_dir / "classes.dex"
-    assemble_root = input_path if input_path.is_dir() else input_path.parent
-    cmd = ["java", "-Xmx8G", "-jar", SMALI_JAR, "assemble", str(assemble_root), "-o", str(dex_path)]
-    await run_tool(cmd, on_progress, "Smali assemble")
-    await on_progress(70, "🧩 Smali assembly done!")
-    if not dex_path.exists():
-        raise ValueError("Smali assembly produced no .dex output.")
-    return dex_path
+def is_zip_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"PK\x03\x04"
+    except Exception:
+        return False
 
 
-async def compile_java_to_dex(input_path: Path, work_dir: Path, on_progress) -> Path:
-    await on_progress(25, "☕ Preparing Java sources...")
-    java_files = []
-    input_jar = None
-    android_jar = find_android_jar()
+def is_pdf_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(5) == b"%PDF-"
+    except Exception:
+        return False
+
+
+OCR_LANGS = "eng+hin+urd+ben+mar+guj+tam+tel+kan+mal+pan"
+OCR_PSMS = ("3", "6", "11")
+
+
+def has_meaningful_text(data: str) -> bool:
+    return any(ch.isalnum() for ch in data.replace("\x0c", " ").strip())
+
+
+async def convert_single_pdf(pdf_path: Path, txt_path: Path, on_progress, label: str) -> bool:
+    """Extract text with progressive flag fallback. Returns True if meaningful output produced."""
+    if txt_path.exists():
+        txt_path.unlink()
+    started = time.monotonic()
+
+    async def hb():
+        mins = int((time.monotonic() - started) // 60)
+        edit(f"⏳ {label}: still converting... ({mins} min)", keep_button=True)
+
+    candidates = [
+        ["pdftotext", "-q", "-layout", str(pdf_path), str(txt_path)],
+        ["pdftotext", "-q", "-raw", str(pdf_path), str(txt_path)],
+        ["pdftotext", "-q", "-fixed", "10", str(pdf_path), str(txt_path)],
+        ["pdftotext", "-q", str(pdf_path), str(txt_path)],
+    ]
+    for cmd in candidates:
+        try:
+            await run_tool(cmd, on_progress, label, timeout=1200, progress_stall=600, heartbeat=hb, check_errors=False)
+        except Exception as e:
+            log.warning("%s attempt failed: %s", label, e)
+            if txt_path.exists():
+                txt_path.unlink()
+            continue
+        if txt_path.exists():
+            content = txt_path.read_text(encoding="utf-8", errors="replace")
+            if has_meaningful_text(content):
+                return True
+            txt_path.unlink()
+    return False
+
+
+async def ocr_page(page: Path, base: Path, on_progress, label: str) -> str:
+    for psm in OCR_PSMS:
+        out = Path(str(base) + f"_psm{psm}.txt")
+        if out.exists():
+            out.unlink()
+        try:
+            await run_tool(["tesseract", str(page), str(Path(str(base) + f"_psm{psm}")), "-l", OCR_LANGS, "--psm", psm],
+                           on_progress, label, timeout=300, progress_stall=180, check_errors=False)
+        except Exception as e:
+            log.warning("tesseract failed for %s: %s", page.name, e)
+            continue
+        if out.exists():
+            content = out.read_text(encoding="utf-8", errors="replace")
+            if has_meaningful_text(content):
+                return content
+    return ""
+
+
+async def ocr_pdf(pdf_path: Path, txt_path: Path, on_progress, label: str, start_pct: int = 0, end_pct: int = 100) -> bool:
+    """OCR fallback for scanned (image-only) PDFs via pdftoppm + tesseract."""
+    if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
+        log.warning("OCR tools missing (pdftoppm/tesseract)")
+        return False
+    await on_progress(start_pct, f"🔍 {label}: rendering pages...")
+    ocr_dir = pdf_path.parent / (pdf_path.stem + "_ocr")
+    ocr_dir.mkdir(exist_ok=True)
+    try:
+        await run_tool(["pdftoppm", "-r", "300", "-jpeg", str(pdf_path), str(ocr_dir / "pg")], on_progress, label, timeout=1200, progress_stall=600, check_errors=False)
+    except Exception as e:
+        log.warning("pdftoppm failed for %s: %s", pdf_path.name, e)
+        return False
+    pages = [p for p in ocr_dir.iterdir() if p.suffix.lower() == ".jpg"]
+    pages.sort(key=lambda p: int(re.search(r"(\d+)\.jpg$", p.name).group(1)) if re.search(r"(\d+)\.jpg$", p.name) else 0)
+    if not pages:
+        log.warning("No pages rendered for %s", pdf_path.name)
+        return False
+    texts = []
+    total_pages = len(pages)
+    span = max(1, end_pct - start_pct)
+    for i, page in enumerate(pages, 1):
+        if CANCELLED["v"]:
+            raise JobCancelled()
+        pct = start_pct + int((i - 1) * span / total_pages)
+        await on_progress(pct, f"🔍 {label}: OCR page {i}/{total_pages}...")
+        t = await ocr_page(page, ocr_dir / f"out_{i}", on_progress, label)
+        if t:
+            texts.append(t)
+    if not texts:
+        log.warning("OCR produced no text for %s", pdf_path.name)
+        return False
+    await on_progress(end_pct - 1, f"🔍 {label}: saving text...")
+    txt_path.write_text("\n".join(texts), encoding="utf-8")
+    return has_meaningful_text(txt_path.read_text(encoding="utf-8", errors="replace"))
+
+
+async def convert_pdfs(input_path: Path, work_dir: Path, on_progress) -> tuple:
+    await on_progress(20, "📄 Preparing PDF files...")
+    pdf_files: list = []
+    is_single = False
     ext = Path(FILENAME).suffix.lower()
 
     if input_path.is_file():
-        if ext == ".java":
-            java_files = [str(input_path)]
-        elif ext in (".jar", ".class"):
-            input_jar = input_path
-        elif ext == ".zip":
-            extract_dir = work_dir / "java_src"
+        if ext == ".pdf" or is_pdf_file(input_path):
+            pdf_files = [input_path]
+            is_single = True
+        elif ext == ".zip" or is_zip_file(input_path):
+            extract_dir = work_dir / "pdf_src"
             extract_dir.mkdir(exist_ok=True)
-            with zipfile.ZipFile(input_path, "r") as zf:
+            with TolerantZipFile(input_path, "r") as zf:
                 zf.extractall(extract_dir)
-            java_files = find_inputs(extract_dir, {".java"})
-            if not java_files:
-                jars = find_inputs(extract_dir, {".jar"})
-                if jars:
-                    input_jar = Path(jars[0])
-                else:
-                    classes = find_inputs(extract_dir, {".class"})
-                    if classes:
-                        cls_dir = extract_dir
-                        class_root = work_dir / "classes_root"
-                        class_root.mkdir(exist_ok=True)
-                        for c in classes:
-                            rel = Path(c).relative_to(cls_dir)
-                            dst = class_root / rel
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(c, dst)
-                        input_jar = await asyncio.to_thread(_jar_dir, class_root, work_dir / "classes.jar")
-                    else:
-                        raise ValueError("No .java, .jar, or .class files found in the ZIP.")
-            else:
-                java_files = java_files
+            pdf_files = find_inputs(extract_dir, {".pdf"})
+        else:
+            raise ValueError("Unsupported input. Send a .pdf file or a ZIP containing PDF files.")
     elif input_path.is_dir():
-        java_files = find_inputs(input_path, {".java"})
-        if not java_files:
-            jars = find_inputs(input_path, {".jar"})
-            if jars:
-                input_jar = Path(jars[0])
-            else:
-                raise ValueError("No .java or .jar files found in the directory.")
+        pdf_files = find_inputs(input_path, {".pdf"})
     else:
-        raise ValueError("Unsupported input for Java → DEX compile.")
+        raise ValueError("Unsupported input for PDF conversion.")
 
-    max_files = MAX_SMALI_FILES_PREMIUM if IS_PREMIUM else MAX_SMALI_FILES_FREE
-    if not IS_ADMIN and len(java_files) > max_files:
-        raise ValueError(f"Too many .java files: {len(java_files)} — max {max_files} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
+    if not pdf_files:
+        raise ValueError("No PDF files found in the input.")
 
-    if java_files:
-        classes_dir = work_dir / "classes"
-        classes_dir.mkdir(exist_ok=True)
-        await on_progress(40, "☕ Compiling Java → .class (javac)...")
-        java_files = [str(await asyncio.to_thread(_prepare_java_file, Path(f))) for f in java_files]
-        cmd = ["javac", "-d", str(classes_dir)]
-        if android_jar:
-            cmd += ["-classpath", android_jar]
-        cmd += java_files
-        await run_tool(cmd, on_progress, "javac")
-        if not any(classes_dir.rglob("*.class")):
-            raise ValueError("javac produced no .class files (check your Java source).")
-        input_jar = await asyncio.to_thread(_jar_dir, classes_dir, work_dir / "classes.jar")
-        await on_progress(60, "📦 Packaged classes → JAR...")
+    max_pdf = MAX_PDF_PREMIUM if IS_PREMIUM else MAX_PDF_FREE
+    if not IS_ADMIN and len(pdf_files) > max_pdf:
+        raise ValueError(f"Too many PDFs in ZIP: {len(pdf_files)} — max {max_pdf} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
 
-    await on_progress(65, "🧬 Running D8 (class → .dex)...")
-    dex_out = work_dir / "dex_out"
-    dex_out.mkdir(exist_ok=True)
-    cmd = ["java", "-Xmx8G", "-cp", R8_JAR, "com.android.tools.r8.D8", "--release", "--output", str(dex_out)]
-    if android_jar:
-        cmd += ["--lib", android_jar]
-    cmd += [str(input_jar)]
-    await run_tool(cmd, on_progress, "D8")
-    dex_files = sorted(dex_out.glob("*.dex"))
-    if not dex_files:
-        raise ValueError("D8 produced no .dex output.")
-    if len(dex_files) == 1:
-        return dex_files[0]
-    dex_zip = work_dir / "dex_output.zip"
-    with zipfile.ZipFile(dex_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        for d in dex_files:
-            zf.write(d, d.name)
-    await on_progress(80, "✅ D8 done!")
-    return dex_zip
+    scanned = []
+    ocr_used = 0
+    total = len(pdf_files)
+    for i, pf in enumerate(pdf_files, 1):
+        if CANCELLED["v"]:
+            raise JobCancelled()
+        txt = pf.with_suffix(".txt")
+        band_start = int(20 + (i - 1) * 60 / total)
+        band_end = int(20 + i * 60 / total)
+        await on_progress(band_start, f"📄 Converting PDF {i}/{total}...")
+        ok = await convert_single_pdf(pf, txt, on_progress, f"pdftotext {i}")
+        if not ok:
+            ok = await ocr_pdf(pf, txt, on_progress, f"OCR {i}", band_start, band_end)
+            if ok:
+                ocr_used += 1
+        if not ok:
+            scanned.append(pf.name)
 
-
-COMMON_ANDROID_IMPORTS = {
-    "Activity": "android.app.Activity", "Dialog": "android.app.Dialog",
-    "AlertDialog": "android.app.AlertDialog", "Notification": "android.app.Notification",
-    "NotificationManager": "android.app.NotificationManager",
-    "Context": "android.content.Context", "Intent": "android.content.Intent",
-    "SharedPreferences": "android.content.SharedPreferences",
-    "ColorStateList": "android.content.res.ColorStateList",
-    "Resources": "android.content.res.Resources", "Configuration": "android.content.res.Configuration",
-    "Bundle": "android.os.Bundle", "Handler": "android.os.Handler", "Looper": "android.os.Looper",
-    "Build": "android.os.Build", "Environment": "android.os.Environment", "StatFs": "android.os.StatFs",
-    "PowerManager": "android.os.PowerManager", "Vibrator": "android.os.Vibrator",
-    "BlurMaskFilter": "android.graphics.BlurMaskFilter", "Paint": "android.graphics.Paint",
-    "Canvas": "android.graphics.Canvas", "Color": "android.graphics.Color", "Bitmap": "android.graphics.Bitmap",
-    "Typeface": "android.graphics.Typeface",
-    "Drawable": "android.graphics.drawable.Drawable",
-    "GradientDrawable": "android.graphics.drawable.GradientDrawable",
-    "ColorDrawable": "android.graphics.drawable.ColorDrawable",
-    "View": "android.view.View", "ViewGroup": "android.view.ViewGroup",
-    "Window": "android.view.Window", "Gravity": "android.view.Gravity",
-    "View": "android.view.View", "View.OnClickListener": "android.view.View$OnClickListener",
-    "Spannable": "android.text.Spannable", "SpannableString": "android.text.SpannableString",
-    "Log": "android.util.Log", "SparseArray": "android.util.SparseArray",
-    "FrameLayout": "android.widget.FrameLayout", "RelativeLayout": "android.widget.RelativeLayout",
-    "LinearLayout": "android.widget.LinearLayout", "ScrollView": "android.widget.ScrollView",
-    "TextView": "android.widget.TextView", "EditText": "android.widget.EditText",
-    "Button": "android.widget.Button", "ImageView": "android.widget.ImageView",
-    "Toast": "android.widget.Toast", "ListView": "android.widget.ListView",
-    "BaseAdapter": "android.widget.BaseAdapter", "ArrayAdapter": "android.widget.ArrayAdapter",
-    "AdapterView": "android.widget.AdapterView",
-    "Animator": "android.animation.Animator", "ValueAnimator": "android.animation.ValueAnimator",
-    "ObjectAnimator": "android.animation.ObjectAnimator",
-}
-
-
-def _auto_add_android_imports(path: Path) -> Path:
-    try:
-        text = path.read_text(errors="replace")
-    except Exception:
-        return path
-    if re.search(r"^\s*package\s+", text, re.M):
-        return path
-    existing_imports = set(re.findall(r"^\s*import\s+([\w.]+);", text, re.M))
-    declared = set(re.findall(r"\b(?:class|interface|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)", text))
-    needed = []
-    for simple, full in COMMON_ANDROID_IMPORTS.items():
-        base_simple = simple.rsplit(".", 1)[-1]
-        if base_simple in declared:
-            continue
-        if any(imp.split(".")[-1] == base_simple for imp in existing_imports):
-            continue
-        if re.search(rf"\b{re.escape(base_simple)}\b", text):
-            if full not in existing_imports:
-                needed.append(full)
-    if not needed:
-        return path
-    needed.sort()
-    header = "\n".join(f"import {n};" for n in needed) + "\n"
-    m = re.search(r"^", text)
-    new_text = text[:m.start()] + header + text[m.start():]
-    path.write_text(new_text)
-    return path
-
-
-def _rename_java_to_public_class(path: Path) -> Path:
-    try:
-        text = path.read_text(errors="replace")
-    except Exception:
-        return path
-    m = re.search(r"public\s+(?:abstract\s+|final\s+)?(?:strictfp\s+)?(class|interface|enum|@interface|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)", text)
-    if m:
-        name = m.group(2)
-        if path.name != name + ".java":
-            new_path = path.with_name(name + ".java")
-            try:
-                shutil.move(str(path), str(new_path))
-                return new_path
-            except Exception:
-                return path
-    return path
-
-
-def _prepare_java_file(path: Path) -> Path:
-    path = _rename_java_to_public_class(path)
-    path = _auto_add_android_imports(path)
-    return path
-    try:
-        text = path.read_text(errors="replace")
-    except Exception:
-        return path
-    m = re.search(r"public\s+(?:abstract\s+|final\s+)?(?:strictfp\s+)?(class|interface|enum|@interface|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)", text)
-    if m:
-        name = m.group(2)
-        if path.name != name + ".java":
-            new_path = path.with_name(name + ".java")
-            try:
-                shutil.move(str(path), str(new_path))
-                return new_path
-            except Exception:
-                return path
-    return path
-
-
-def _jar_dir(src_dir: Path, out_jar: Path) -> Path:
-    with zipfile.ZipFile(out_jar, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(src_dir):
-            for f in files:
-                fp = os.path.join(root, f)
-                arcname = os.path.relpath(fp, src_dir)
-                zf.write(fp, arcname)
-    return out_jar
-
-
-def check_zip_limits(file_path: Path):
-    if IS_ADMIN:
-        return
-    if Path(FILENAME).suffix.lower() != ".zip":
-        return
-    with zipfile.ZipFile(file_path) as zf:
-        names = zf.namelist()
-    so_dex = sum(1 for n in names if n.lower().endswith((".so", ".dex")))
-    apks = sum(1 for n in names if n.lower().endswith(".apk"))
-    max_so_dex = 5 if IS_PREMIUM else 1
-    max_apk = 2 if IS_PREMIUM else 1
-    if so_dex > max_so_dex:
-        raise ValueError(f"ZIP contains {so_dex} .so/.dex files — max {max_so_dex} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
-    if apks > max_apk:
-        raise ValueError(f"ZIP contains {apks} .apk files — max {max_apk} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
+    await on_progress(85, "📦 Packaging TXT files...")
+    if is_single:
+        result = Path(pdf_files[0]).with_suffix(".txt")
+        if not result.exists():
+            raise ValueError("pdftotext produced no output file.")
+    else:
+        result = work_dir / "txt_files.zip"
+        with TolerantZipFile(result, "w", zipfile.ZIP_DEFLATED) as zf:
+            for pf in pdf_files:
+                txt = Path(pf).with_suffix(".txt")
+                if txt.exists():
+                    zf.write(txt, txt.name)
+        if not os.path.getsize(result):
+            raise ValueError("No TXT output produced.")
+    return result, scanned, ocr_used
 
 
 async def main():
@@ -527,12 +438,14 @@ async def main():
         log.error("Missing env TELEGRAM_BOT_TOKEN / PAYLOAD_CHAT_ID")
         sys.exit(1)
 
-    edit("🟢 Job started! Preparing DEX Compile engine on cloud server...", parse_mode="HTML")
+    edit("🟢 Job started! Preparing PDF → TXT engine on cloud server...", parse_mode="HTML")
 
-    work_dir = Path(tempfile.gettempdir()) / ("dexcompile_" + os.urandom(8).hex())
+    shm_base = Path("/dev/shm")
+    base_dir = shm_base if shm_base.is_dir() and os.access(str(shm_base), os.W_OK) else Path(tempfile.gettempdir())
+    work_dir = base_dir / ("pdftxt_" + os.urandom(8).hex())
     try:
         work_dir.mkdir(parents=True)
-        ext = Path(FILENAME).suffix or ".bin"
+        ext = Path(FILENAME).suffix or ".pdf"
         dest = work_dir / f"input_file{ext}"
         last = [-100.0]
 
@@ -613,60 +526,43 @@ async def main():
             edit(f"❌ File is {size/1024/1024:.1f} MB — max download limit is {MAX_DOWNLOAD_MB} MB.", keep_button=False)
             return
 
-        try:
-            check_zip_limits(dest)
-        except ValueError as e:
-            edit(f"❌ {e}", keep_button=False)
-            return
-
-        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Preparing DEX compile...")
+        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Preparing PDF conversion...")
 
         last_prog = [0, ""]
-        async def on_progress(pct: int, label: str = "🛠️ Compiling to .dex..."):
+        async def on_progress(pct: int, label: str = "📄 Converting PDF → TXT..."):
             if pct - last_prog[0] < 5 and label == last_prog[1]:
                 return
             last_prog[0], last_prog[1] = pct, label
             edit(f"{label}\n{progress_bar(pct)}")
 
-        mode = MODE
-        if mode == "auto":
-            fname = FILENAME.lower()
-            if fname.endswith(".smali") or (fname.endswith(".zip") and _zip_has(dest, ".smali")):
-                mode = "smali"
-            elif fname.endswith((".java", ".jar", ".class")) or (fname.endswith(".zip") and _zip_has_java(dest)):
-                mode = "java"
-            else:
-                raise ValueError("Could not detect source type. Use the compile button for Smali or Java.")
-
         try:
-            if mode == "smali":
-                result = await compile_smali_to_dex(dest, work_dir, on_progress)
-                caption = f"✅ Compiled Smali → <b>.dex</b> — Powered By @R3V_X"
-                done_msg = "✅ Smali → DEX compile complete!"
-            else:
-                result = await compile_java_to_dex(dest, work_dir, on_progress)
-                caption = f"✅ Compiled Java → <b>.dex</b> — Powered By @R3V_X"
-                done_msg = "✅ Java → DEX compile complete!"
+            result, scanned, ocr_used = await convert_pdfs(dest, work_dir, on_progress)
+            notes = []
+            if ocr_used:
+                notes.append(f"🔍 OCR used on {ocr_used} PDF(s)")
+            if scanned:
+                notes.append(f"⚠️ {len(scanned)} PDF(s) had no readable text")
+            note_str = " | ".join(notes)
+            caption = f"✅ PDF converted → <b>TXT</b>" + (f" ({note_str})" if note_str else "") + " — Powered By @R3V_X"
+            done_msg = "✅ PDF → TXT conversion complete!"
         except asyncio.TimeoutError:
-            edit("⏰ Timeout! The input is too large to compile.", keep_button=False)
+            edit("⏰ Timeout! The PDF is too large to convert.", keep_button=False)
             return
         except ValueError as e:
             edit(f"❌ {e}", keep_button=False)
             return
         except Exception as e:
-            await send_error_log(work_dir, e, "DEX Compile crashed")
+            await send_error_log(work_dir, e, "PDF → TXT conversion crashed")
             return
 
         await on_progress(100, done_msg)
-        edit("📦 Packaging .dex file...")
+        edit("📦 Packaging TXT files...")
 
-        safe_name = re.sub(r'[^A-Za-z0-9._-]+', "_", FILENAME)[:60] or "file"
-        orig_stem = Path(safe_name).stem or "code"
         up_last = [0]
         async def on_up(pct: int):
             if pct < up_last[0] or pct - up_last[0] < 2: return
             up_last[0] = pct
-            edit(f"{done_msg}\n📤 Sending .dex...\n\n{progress_bar(pct)}")
+            edit(f"{done_msg}\n📤 Sending TXT...\n\n{progress_bar(pct)}")
 
         try:
             http_ok = False
@@ -707,7 +603,7 @@ async def main():
                 await proc.wait()
                 if proc.returncode != 0:
                     raise ValueError(f"MTProto Upload failed with code {proc.returncode}")
-            edit("✅ DEX compile complete! .dex file delivered. 🔥", keep_button=False)
+            edit("✅ PDF → TXT conversion complete! TXT file delivered. 🔥", keep_button=False)
 
             if JOB_ID:
                 notify_app("FINAL_ZIP_URL:telegram_direct_upload")
@@ -715,23 +611,6 @@ async def main():
             await send_error_log(work_dir, e, "Result upload failed")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
-
-
-def _zip_has(zip_path: Path, suffix: str) -> bool:
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            return any(n.lower().endswith(suffix) for n in zf.namelist())
-    except Exception:
-        return False
-
-
-def _zip_has_java(zip_path: Path) -> bool:
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            names = zf.namelist()
-        return any(n.lower().endswith((".java", ".jar", ".class")) for n in names)
-    except Exception:
-        return False
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
-name: decompile-job
-run-name: job-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
+name: decompile-jadx
+run-name: jadx-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
 # re-register: workflow was stuck in deleted state after history reset
 on:
   repository_dispatch:
-    types: [decompile-job]
+    types: [decompile-jadx]
 
 permissions:
   actions: write
@@ -23,33 +23,21 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Cache Ghidra
-        id: ghidra-cache
+      - name: Cache JADX
+        id: jadx-cache
         uses: actions/cache@v4
         with:
-          path: /opt/ghidra
-          key: ghidra-11.3.2-v1
+          path: /opt/jadx
+          key: jadx-1.5.6
 
-      - name: Get Ghidra
-        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+      - name: Get JADX
+        if: steps.jadx-cache.outputs.cache-hit != 'true'
         run: |
-          if [ -f /opt/ghidra/support/analyzeHeadless ]; then
-            echo "Ghidra already valid at /opt/ghidra"
-            exit 0
-          fi
-          if [ -d /opt/ghidra ]; then
-            echo "stale cache layout, removing"
-            sudo rm -rf /opt/ghidra
-          fi
-          curl -L --retry 3 -o /tmp/ghidra.zip \
-            "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.3.2_build/ghidra_11.3.2_PUBLIC_20250415.zip"
-          sudo unzip -q -o /tmp/ghidra.zip -d /opt
-          ghdir=$(sudo bash -c 'ls -d /opt/ghidra_* 2>/dev/null | head -n1')
-          echo "extracted dir: $ghdir"
-          sudo mv "$ghdir" /opt/ghidra
-          test -f /opt/ghidra/support/analyzeHeadless
-          echo "Ghidra ready"
-          rm /tmp/ghidra.zip
+          sudo mkdir -p /opt/jadx
+          curl -L -o /tmp/jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip
+          sudo unzip -q -o /tmp/jadx.zip -d /opt/jadx
+          sudo chmod +x /opt/jadx/bin/jadx
+          echo "JADX ready"
 
       - name: Cache TG Session
         uses: actions/cache@v4
@@ -77,7 +65,7 @@ jobs:
               print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
           PYEOF
 
-      - name: Run decompile worker
+      - name: Run JADX worker
         env:
           TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
           PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
@@ -93,12 +81,11 @@ jobs:
           PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
-
-          JAVA_MAX_MEM: "6G"
+          _JAVA_OPTIONS: "-XX:+UseParallelGC -Djava.awt.headless=true"
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q httpx "pyrogram==2.0.106" tgcrypto
-          /tmp/venv/bin/python worker.py
+          /tmp/venv/bin/python worker_jadx.py
 
       - name: Report Failure to Telegram
         if: failure()
@@ -119,7 +106,7 @@ jobs:
                       data={
                           "chat_id": chat_id,
                           "message_id": msg_id,
-                          "text": "❌ <b>Decompilation Failed!</b>\nWorkflow runner encountered an unexpected error during setup or execution.",
+                          "text": "❌ <b>JADX Decompilation Failed!</b>\nWorkflow runner encountered an unexpected error during setup or execution.",
                           "parse_mode": "HTML"
                       },
                       timeout=10

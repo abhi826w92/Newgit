@@ -409,7 +409,9 @@ async def main():
         sys.exit(1)
 
     start_time = time.time()
-    work_dir = Path(tempfile.mkdtemp(prefix="worker_res_decode_"))
+    shm_base = Path("/dev/shm")
+    base_dir = shm_base if shm_base.is_dir() and os.access(str(shm_base), os.W_OK) else Path(tempfile.gettempdir())
+    work_dir = Path(tempfile.mkdtemp(prefix="worker_res_decode_", dir=base_dir))
     try:
         edit("⏳ <b>Starting Res Decoder Worker...</b>", parse_mode="HTML")
         dest = work_dir / Path(FILENAME).name
